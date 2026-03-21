@@ -9,10 +9,24 @@ Uses tvDatafeed to fetch OHLC data and calculates:
 Workflow:
   1. Fetch all tickers from Supabase `pivot_trend_analysis` table
   2. Skip any ticker where `last_updated` is already today (IST)
-  3. For each remaining ticker, fetch Daily / Weekly / Monthly bars via tvDatafeed
-  4. Calculate CPR, trends, 2-day relationship
-  5. Upsert results back to Supabase
-  6. Print a summary: success count, failure count, list of failed tickers
+  3. Parallel fetch + compute via ThreadPoolExecutor (MAX_WORKERS=4)
+  4. Upsert results in batches of UPSERT_BATCH
+  5. Print summary + write results/pivot.json for GitHub Actions
+
+Run context:
+  EOD after NSE market close (3:30 PM IST). Script runs at 4:30 PM IST.
+  The last bar from tvDatafeed IS today's completed candle — no bar is dropped.
+  CPR levels are built from today's H/L/C → correct levels for TOMORROW's session.
+
+Performance:
+  Sequential (old): ~750 tickers x 3 fetches x 0.3s sleep = 11+ min
+  Parallel (new):   ~750 tickers / 4 workers x 3 fetches x 0.3s = 3-4 min
+
+Rate limiting:
+  - MAX_WORKERS=4 avoids 429s on free TradingView accounts
+  - threading.Semaphore caps simultaneous open WebSocket connections
+  - 429 errors trigger exponential backoff (2s -> 4s -> 8s -> 16s)
+  - Thread-local TvDatafeed instances (one per worker, no shared state)
 
 Requirements:
     pip install tvDatafeed supabase python-dotenv pytz
@@ -23,11 +37,16 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import sys
 import time
 import logging
+import argparse
+import traceback
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, date
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, List, Tuple
 
 import pytz
 import pandas as pd
@@ -39,19 +58,36 @@ from tvDatafeed import TvDatafeed, Interval
 # Configuration
 # ---------------------------------------------------------------------------
 
-load_dotenv(".env.local") # reads SUPABASE_URL and SUPABASE_KEY from a .env file
+load_dotenv(".env.local")
 
-SUPABASE_URL: str = os.environ["SUPABASE_URL"]
-SUPABASE_KEY: str = os.environ["NEXT_PUBLIC_SUPABASE_ANON_KEY"]
+SUPABASE_URL: str = (
+    os.environ.get("NEXT_PUBLIC_SUPABASE_URL")
+    or os.environ.get("SUPABASE_URL", "")
+)
+SUPABASE_KEY: str = (
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    or os.environ.get("SUPABASE_KEY", "")
+    or os.environ.get("NEXT_PUBLIC_SUPABASE_ANON_KEY", "")
+)
 
+EXCHANGE       = "NSE"
+IST            = pytz.timezone("Asia/Kolkata")
+UPSERT_BATCH   = 50
+N_DAILY_BARS   = 5
+N_WEEKLY_BARS  = 5
+N_MONTHLY_BARS = 5
+SLEEP_BETWEEN  = 0.3    # seconds between each fetch within a worker
 
-EXCHANGE         = "NSE"
-IST              = pytz.timezone("Asia/Kolkata")
-UPSERT_BATCH     = 50
-N_DAILY_BARS     = 5      # need at least 3 completed daily bars
-N_WEEKLY_BARS    = 5
-N_MONTHLY_BARS   = 5
-SLEEP_BETWEEN    = 0.3    # seconds between tvDatafeed calls (be polite)
+# ── Parallelism & rate limiting ───────────────────────────────────────────────
+# 4 workers is safe for free TradingView accounts.
+# Each ticker makes 3 fetches (D/W/M) so total connections stay well managed.
+MAX_WORKERS: int    = 4
+MAX_RETRIES: int    = 4       # 1 original + 3 retries
+BACKOFF_BASE: float = 2.0     # 2s -> 4s -> 8s -> 16s
+BACKOFF_MAX: float  = 60.0
+
+# Semaphore caps concurrent open WebSocket connections.
+_connection_semaphore: threading.Semaphore = threading.Semaphore(MAX_WORKERS)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,10 +115,10 @@ class CPRLevels:
     tcpr:      float
     r1:        float
     s1:        float
-    max_pivot: float   # max(pivot, bcpr, tcpr)
-    min_pivot: float   # min(pivot, bcpr, tcpr)
-    max_high:  float   # max(r1, prev_high)
-    max_low:   float   # min(s1, prev_low)
+    max_pivot: float
+    min_pivot: float
+    max_high:  float
+    max_low:   float
 
 
 @dataclass
@@ -102,14 +138,10 @@ class TickerResult:
 
 
 # ---------------------------------------------------------------------------
-# CPR / Pivot calculations
+# CPR / Pivot calculations  (pure CPU — safe to call from any thread)
 # ---------------------------------------------------------------------------
 
 def compute_cpr(current: OHLCBar, previous: OHLCBar) -> CPRLevels:
-    """
-    Build CPR levels from `current` bar's H/L/C.
-    `previous` bar's H/L is used for Max High / Max Low boundary.
-    """
     h, l, c = current.high, current.low, current.close
     pivot = (h + l + c) / 3
     bcpr  = (h + l) / 2
@@ -146,148 +178,179 @@ def determine_2day_cpr(today: CPRLevels, prev: CPRLevels) -> str:
 
 
 def cpr_width_pct(lvl: CPRLevels) -> float:
-    """
-    CPR Width % = (TCPR - BCPR) / Pivot * 100
-    Uses max_pivot and min_pivot which already equal TCPR and BCPR
-    (since TCPR = max and BCPR = min of the CPR band).
-    """
     if lvl.pivot == 0:
         return 0.0
     return ((lvl.max_pivot - lvl.min_pivot) / lvl.pivot) * 100
 
 
 def classify_cpr_width(width_pct: float) -> str:
-    """
-    Classify CPR width % into a label per the standard cutoff table:
-
-    Width (%)       Classification
-    ─────────────── ──────────────
-    ≤ 0.1           Super Narrow
-    > 0.1 – ≤ 0.25  Narrow
-    > 0.25 – ≤ 0.5  Medium
-    > 0.5 – ≤ 1.5   Wide
-    > 1.5            Very Wide
-    """
-    if width_pct <= 0.1:
-        return "Super Narrow"
-    elif width_pct <= 0.25:
-        return "Narrow"
-    elif width_pct <= 0.5:
-        return "Medium"
-    elif width_pct <= 1.5:
-        return "Wide"
-    else:
-        return "Very Wide"
+    if width_pct <= 0.1:   return "Super Narrow"
+    elif width_pct <= 0.25: return "Narrow"
+    elif width_pct <= 0.5:  return "Medium"
+    elif width_pct <= 1.5:  return "Wide"
+    else:                   return "Very Wide"
 
 
 # ---------------------------------------------------------------------------
-# tvDatafeed helpers
+# Per-thread TvDatafeed
 # ---------------------------------------------------------------------------
+
+_thread_local = threading.local()
+
+def _get_thread_tv() -> TvDatafeed:
+    """Return (or lazily create) a per-thread TvDatafeed instance."""
+    if not hasattr(_thread_local, "tv"):
+        _thread_local.tv = TvDatafeed()
+    return _thread_local.tv
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "429" in msg or "too many requests" in msg
+
 
 def _row_to_bar(row: pd.Series) -> OHLCBar:
-    return OHLCBar(high=float(row["high"]),
-                   low=float(row["low"]),
-                   close=float(row["close"]))
-
-
-def fetch_bars(tv: TvDatafeed, symbol: str, interval: Interval,
-               n_bars: int) -> Optional[pd.DataFrame]:
-    """
-    Fetch n_bars of OHLC from tvDatafeed. Returns None on error.
-    Drops the last (incomplete / still-forming) bar to ensure
-    we always work with completed candles.
-    """
-    try:
-        df = tv.get_hist(symbol=symbol, exchange=EXCHANGE,
-                         interval=interval, n_bars=n_bars + 1)
-        if df is None or df.empty or len(df) < 3:
-            return None
-        # Drop the last row — it's the currently forming (incomplete) bar
-        df = df.iloc[:-1]
-        return df
-    except Exception as exc:
-        log.debug("  fetch_bars failed (%s %s): %s", symbol, interval, exc)
-        return None
+    return OHLCBar(
+        high=float(row["high"]),
+        low=float(row["low"]),
+        close=float(row["close"]),
+    )
 
 
 # ---------------------------------------------------------------------------
-# Per-ticker analysis
+# Fetch one timeframe with retry + backoff
 # ---------------------------------------------------------------------------
 
-def analyse_ticker(tv: TvDatafeed, symbol: str) -> TickerResult:
+def fetch_bars_with_retry(
+    symbol: str,
+    interval: Interval,
+    n_bars: int,
+) -> Optional[pd.DataFrame]:
     """
-    Fetch Daily, Weekly, Monthly bars and compute all trends.
+    Fetch OHLC bars for one timeframe with exponential backoff on 429s.
 
-    Bar layout after dropping the forming bar (index 0 = oldest):
-        df.iloc[-1]  →  most recent COMPLETED bar  (D-1 for daily)
-        df.iloc[-2]  →  one bar before that         (D-2 for daily)
-        df.iloc[-3]  →  two bars before that        (D-3 for daily)
-
-    LTP = close of the most recent completed DAILY bar (df_d.iloc[-1].close).
-    This is correct for pivot analysis — we always evaluate against the
-    latest *confirmed* price, not a mid-candle intraday tick.
+    EOD context: last bar IS today's completed candle — no bar is dropped.
     """
-    result = TickerResult(ticker=symbol, close=0.0)
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            with _connection_semaphore:
+                tv = _get_thread_tv()
+                df = tv.get_hist(
+                    symbol   = symbol,
+                    exchange = EXCHANGE,
+                    interval = interval,
+                    n_bars   = n_bars,
+                )
+                time.sleep(SLEEP_BETWEEN)   # courtesy gap inside semaphore
 
-    # ── Fetch all three timeframes ──────────────────────────────────────────
-    df_d = fetch_bars(tv, symbol, Interval.in_daily,   N_DAILY_BARS)
-    time.sleep(SLEEP_BETWEEN)
-    df_w = fetch_bars(tv, symbol, Interval.in_weekly,  N_WEEKLY_BARS)
-    time.sleep(SLEEP_BETWEEN)
-    df_m = fetch_bars(tv, symbol, Interval.in_monthly, N_MONTHLY_BARS)
-    time.sleep(SLEEP_BETWEEN)
+            if df is None or df.empty or len(df) < 3:
+                return None
+            return df
+
+        except Exception as exc:
+            is_429 = _is_rate_limit_error(exc)
+
+            if attempt < MAX_RETRIES:
+                wait = min(BACKOFF_BASE ** attempt, BACKOFF_MAX)
+                if is_429:
+                    if hasattr(_thread_local, "tv"):
+                        del _thread_local.tv
+                    log.warning(
+                        "429 on %s %s (attempt %d/%d) -- backing off %.0fs ...",
+                        symbol, interval, attempt, MAX_RETRIES, wait,
+                    )
+                else:
+                    log.warning(
+                        "Transient error on %s %s (attempt %d/%d): %s -- retrying in %.0fs ...",
+                        symbol, interval, attempt, MAX_RETRIES, type(exc).__name__, wait,
+                    )
+                time.sleep(wait)
+            else:
+                log.error(
+                    "X Giving up on %s %s after %d attempts: %s",
+                    symbol, interval, MAX_RETRIES, exc,
+                )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Worker function  (runs in thread pool)
+# ---------------------------------------------------------------------------
+
+def process_ticker(
+    ticker: str,
+    now_utc: str,
+) -> Tuple[str, Optional[dict], Optional[str]]:
+    """
+    Fetch Daily + Weekly + Monthly bars, compute all CPR/trend values,
+    return the upsert payload dict.
+
+    Returns:
+        (ticker, payload, error_message)
+        payload is None on failure.
+
+    Bar layout (EOD run, no bars dropped):
+        df.iloc[-1]  -> TODAY's completed bar       (D0 — pivot source)
+        df.iloc[-2]  -> yesterday's bar             (D-1 — boundary)
+        df.iloc[-3]  -> two trading days ago        (D-2 — 2-day comparison)
+    """
+    # ── Fetch all three timeframes sequentially within this worker ────────────
+    df_d = fetch_bars_with_retry(ticker, Interval.in_daily,   N_DAILY_BARS)
+    df_w = fetch_bars_with_retry(ticker, Interval.in_weekly,  N_WEEKLY_BARS)
+    df_m = fetch_bars_with_retry(ticker, Interval.in_monthly, N_MONTHLY_BARS)
 
     if df_d is None or len(df_d) < 3:
-        raise ValueError(f"Insufficient daily data (got {len(df_d) if df_d is not None else 0} bars)")
+        return (ticker, None, f"Insufficient daily data ({len(df_d) if df_d is not None else 0} bars)")
 
-    # ── Daily ───────────────────────────────────────────────────────────────
-    # bar_d1 = yesterday's completed daily candle  → this is the PIVOT bar
-    # bar_d2 = D-2 completed candle                → used for Max High/Low boundaries
-    # bar_d3 = D-3 completed candle                → used to compute D-1's own CPR for 2-day comparison
-    bar_d1 = _row_to_bar(df_d.iloc[-1])   # most recent completed bar
-    bar_d2 = _row_to_bar(df_d.iloc[-2])
-    bar_d3 = _row_to_bar(df_d.iloc[-3]) if len(df_d) >= 3 else bar_d2
+    # ── Daily ─────────────────────────────────────────────────────────────────
+    bar_d0 = _row_to_bar(df_d.iloc[-1])   # today's completed bar — pivot source
+    bar_d1 = _row_to_bar(df_d.iloc[-2])   # yesterday — boundary
+    bar_d2 = _row_to_bar(df_d.iloc[-3]) if len(df_d) >= 3 else bar_d1
 
-    ltp          = bar_d1.close           # LTP = last confirmed close
-    result.close = round(ltp, 2)
-    result.pdh   = round(bar_d1.high, 2)  # Previous Day High
-    result.pdl   = round(bar_d1.low,  2)  # Previous Day Low
+    ltp = bar_d0.close
 
-    # Today's pivot levels (CPR built on D-1 bar, bounded by D-2)
-    lvl_today = compute_cpr(bar_d1, bar_d2)
-    result.daily_trend = determine_trend(ltp, lvl_today)
+    lvl_tomorrow = compute_cpr(bar_d0, bar_d1)    # tomorrow's pivot levels
+    lvl_today    = compute_cpr(bar_d1, bar_d2)    # today's pivot levels (for 2-day compare)
 
-    # CPR Width % and classification (daily timeframe)
-    width_pct = cpr_width_pct(lvl_today)
-    result.width_classification = classify_cpr_width(width_pct)
+    daily_trend           = determine_trend(ltp, lvl_tomorrow)
+    width_classification  = classify_cpr_width(cpr_width_pct(lvl_tomorrow))
+    cpr_2day_relationship = determine_2day_cpr(lvl_tomorrow, lvl_today)
 
-    # D-1's pivot levels (CPR built on D-2 bar, bounded by D-3)
-    lvl_d1 = compute_cpr(bar_d2, bar_d3)
-    result.cpr_2day_relationship = determine_2day_cpr(lvl_today, lvl_d1)
-
-    # ── Weekly ──────────────────────────────────────────────────────────────
+    # ── Weekly ────────────────────────────────────────────────────────────────
+    weekly_trend = "UNKNOWN"
     if df_w is not None and len(df_w) >= 2:
-        bar_wc = _row_to_bar(df_w.iloc[-1])   # current (forming) week — already dropped, so this is last complete
-        bar_wp = _row_to_bar(df_w.iloc[-2])   # previous completed week
-        lvl_w  = compute_cpr(bar_wc, bar_wp)
-        result.weekly_trend = determine_trend(ltp, lvl_w)
+        lvl_w = compute_cpr(_row_to_bar(df_w.iloc[-1]), _row_to_bar(df_w.iloc[-2]))
+        weekly_trend = determine_trend(ltp, lvl_w)
 
-    # ── Monthly ─────────────────────────────────────────────────────────────
+    # ── Monthly ───────────────────────────────────────────────────────────────
+    monthly_trend = "UNKNOWN"
     if df_m is not None and len(df_m) >= 2:
-        bar_mc = _row_to_bar(df_m.iloc[-1])   # current (forming) month — already dropped
-        bar_mp = _row_to_bar(df_m.iloc[-2])   # previous completed month
-        lvl_m  = compute_cpr(bar_mc, bar_mp)
-        result.monthly_trend = determine_trend(ltp, lvl_m)
+        lvl_m = compute_cpr(_row_to_bar(df_m.iloc[-1]), _row_to_bar(df_m.iloc[-2]))
+        monthly_trend = determine_trend(ltp, lvl_m)
 
-    return result
+    payload = {
+        "ticker":                ticker,
+        "close":                 round(ltp, 2),
+        "monthly_trend":         monthly_trend,
+        "weekly_trend":          weekly_trend,
+        "daily_trend":           daily_trend,
+        "cpr_2day_relationship": cpr_2day_relationship,
+        "width_classification":  width_classification,
+        "pdh":                   round(bar_d0.high, 2),
+        "pdl":                   round(bar_d0.low,  2),
+        "last_updated":          now_utc,
+    }
+
+    return (ticker, payload, None)
 
 
 # ---------------------------------------------------------------------------
 # Supabase helpers
 # ---------------------------------------------------------------------------
 
-def fetch_tickers(client: Client) -> list[dict]:
-    """Return all rows from pivot_trend_analysis as a list of dicts."""
+def fetch_tickers(client: Client) -> List[dict]:
+    """Return all rows from pivot_trend_analysis."""
     response = client.table("pivot_trend_analysis").select("ticker, last_updated").execute()
     return response.data or []
 
@@ -301,22 +364,29 @@ def already_updated_today(last_updated_str: Optional[str]) -> bool:
     if not last_updated_str:
         return False
     try:
-        # Supabase returns ISO strings like "2026-03-06T14:26:12.393558+00:00"
         dt = datetime.fromisoformat(last_updated_str)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        dt_ist = dt.astimezone(IST)
-        return dt_ist.date() == today_ist()
+        return dt.astimezone(IST).date() == today_ist()
     except Exception:
         return False
 
 
-def upsert_batch(client: Client, rows: list[dict]) -> None:
-    table = client.table("pivot_trend_analysis")
-    for i in range(0, len(rows), UPSERT_BATCH):
-        batch = rows[i : i + UPSERT_BATCH]
-        table.upsert(batch, on_conflict="ticker").execute()
-        log.info("  Upserted rows %d–%d.", i + 1, i + len(batch))
+def flush_batch(client: Client, rows: List[dict]) -> None:
+    """Upsert a batch of rows in a single DB call."""
+    if not rows:
+        return
+    try:
+        client.table("pivot_trend_analysis").upsert(
+            rows, on_conflict="ticker"
+        ).execute()
+        log.info("  ^ Flushed %d records to Supabase.", len(rows))
+    except Exception as exc:
+        log.error(
+            "X Batch upsert failed (%d rows): %s: %s",
+            len(rows), type(exc).__name__, exc,
+        )
+        log.debug(traceback.format_exc())
 
 
 # ---------------------------------------------------------------------------
@@ -324,21 +394,26 @@ def upsert_batch(client: Client, rows: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    log.info("=" * 60)
-    log.info("  Pivot & CPR Analysis  —  %s", datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"))
-    log.info("=" * 60)
+    log.info("=" * 62)
+    log.info(
+        "  Pivot & CPR Analysis  --  %s  (workers=%d)",
+        datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"), MAX_WORKERS,
+    )
+    log.info("=" * 62)
 
-    # 1. Connect to Supabase
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        log.error("X Missing env vars. Need NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.")
+        sys.exit(1)
+
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     log.info("Supabase connected.")
 
-    # 2. Fetch ticker list
+    # ── Fetch + skip check ────────────────────────────────────────────────────
     all_rows = fetch_tickers(supabase)
     log.info("Total tickers in DB : %d", len(all_rows))
 
-    # 3. Filter out already-updated tickers
-    to_process: list[str] = []
-    skipped:    list[str] = []
+    to_process: List[str] = []
+    skipped:    List[str] = []
     for row in all_rows:
         ticker = row["ticker"]
         if already_updated_today(row.get("last_updated")):
@@ -350,90 +425,122 @@ def main() -> None:
     log.info("To process          : %d", len(to_process))
 
     if not to_process:
-        log.info("Nothing to do — all tickers already updated today.")
+        log.info("Nothing to do -- all tickers already updated today.")
+        _write_result(0, 0, len(skipped), len(all_rows), [])
         return
 
-    # 4. Connect to tvDatafeed (anonymous — no login needed for EOD data)
-    log.info("Connecting to tvDatafeed …")
-    tv = TvDatafeed()
+    now_utc   = datetime.now(timezone.utc).isoformat()
+    total     = len(to_process)
+    succeeded: List[str]             = []
+    failed:    List[Tuple[str, str]] = []
+    pending_records: List[dict]      = []
 
-    # 5. Process each ticker
-    results_rows: list[dict] = []
-    succeeded:    list[str]  = []
-    failed:       list[tuple[str, str]] = []   # (ticker, reason)
+    # ── Parallel fetch + compute ──────────────────────────────────────────────
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {
+            executor.submit(process_ticker, ticker, now_utc): ticker
+            for ticker in to_process
+        }
 
-    total = len(to_process)
-    for idx, ticker in enumerate(to_process, 1):
-        log.info("[%3d/%3d]  %-15s …", idx, total, ticker)
-        try:
-            result = analyse_ticker(tv, ticker)
-            results_rows.append({
-                "ticker":                result.ticker,
-                "close":                 result.close,
-                "monthly_trend":         result.monthly_trend,
-                "weekly_trend":          result.weekly_trend,
-                "daily_trend":           result.daily_trend,
-                "cpr_2day_relationship": result.cpr_2day_relationship,
-                "width_classification":  result.width_classification,
-                "pdh":                   result.pdh,
-                "pdl":                   result.pdl,
-                "last_updated":          result.last_updated,
-            })
-            succeeded.append(ticker)
-            log.info(
-                "           %-15s  LTP=%-9.2f  M=%-18s  W=%-18s  D=%-18s  CPR2=%-14s  WIDTH=%s",
-                ticker, result.close,
-                result.monthly_trend, result.weekly_trend,
-                result.daily_trend,   result.cpr_2day_relationship,
-                result.width_classification,
-            )
+        completed = 0
+        for future in as_completed(futures):
+            ticker = futures[future]
+            completed += 1
 
-        except Exception as exc:
-            reason = str(exc)
-            failed.append((ticker, reason))
-            log.warning("           %-15s  FAILED — %s", ticker, reason)
+            try:
+                result_ticker, payload, error = future.result()
 
-        # Upsert in rolling batches so we don't lose work if interrupted
-        if len(results_rows) >= UPSERT_BATCH:
-            log.info("  → Flushing batch of %d rows to Supabase …", len(results_rows))
-            upsert_batch(supabase, results_rows)
-            results_rows.clear()
+                if error:
+                    log.warning(
+                        "[%d/%d] X %s -- %s", completed, total, ticker, error
+                    )
+                    failed.append((ticker, error))
+                    continue
 
-    # 6. Upsert remaining rows
-    if results_rows:
-        log.info("  → Flushing final %d rows to Supabase …", len(results_rows))
-        upsert_batch(supabase, results_rows)
+                log.info(
+                    "[%d/%d] %s  LTP=%-9.2f  M=%-18s  W=%-18s  D=%-18s  CPR2=%-14s  WIDTH=%s",
+                    completed, total, ticker,
+                    payload["close"],
+                    payload["monthly_trend"], payload["weekly_trend"],
+                    payload["daily_trend"],   payload["cpr_2day_relationship"],
+                    payload["width_classification"],
+                )
+                succeeded.append(ticker)
+                pending_records.append(payload)
 
-    # 7. Summary
+                if len(pending_records) >= UPSERT_BATCH:
+                    flush_batch(supabase, pending_records)
+                    pending_records.clear()
+
+            except Exception as exc:
+                log.error(
+                    "[%d/%d] X Unhandled error for %s: %s: %s",
+                    completed, total, ticker, type(exc).__name__, exc,
+                )
+                log.debug(traceback.format_exc())
+                failed.append((ticker, str(exc)))
+
+    # ── Final flush ───────────────────────────────────────────────────────────
+    if pending_records:
+        flush_batch(supabase, pending_records)
+        pending_records.clear()
+
+    # ── Summary ───────────────────────────────────────────────────────────────
     log.info("")
-    log.info("=" * 60)
+    log.info("=" * 62)
     log.info("  SUMMARY")
-    log.info("=" * 60)
+    log.info("=" * 62)
     log.info("  Total in DB         : %d", len(all_rows))
     log.info("  Skipped (up-to-date): %d", len(skipped))
     log.info("  Processed           : %d", total)
-    log.info("  ✓ Succeeded         : %d", len(succeeded))
-    log.info("  ✗ Failed            : %d", len(failed))
-
+    log.info("  Succeeded           : %d", len(succeeded))
+    log.info("  Failed              : %d", len(failed))
+    log.info("  Workers             : %d", MAX_WORKERS)
     if failed:
         log.info("")
         log.info("  Failed tickers:")
-        for ticker, reason in failed:
-            log.info("    ✗  %-15s  %s", ticker, reason)
-
-    log.info("=" * 60)
+        for ticker, reason in failed[:20]:
+            log.info("    x  %-15s  %s", ticker, reason)
+        if len(failed) > 20:
+            log.info("    ... and %d more.", len(failed) - 20)
+    log.info("=" * 62)
 
     # ── Write result JSON for GitHub Actions summary ──────────────────────────
+    _write_result(len(succeeded), len(failed), len(skipped), len(all_rows),
+                  [t for t, _ in failed[:10]])
+
+
+def _write_result(succeeded: int, failed: int, skipped: int,
+                  total: int, errors: List[str]) -> None:
     pathlib.Path("results").mkdir(exist_ok=True)
     pathlib.Path("results/pivot.json").write_text(json.dumps({
         "script":    "Pivot Analysis",
-        "succeeded": len(succeeded),
-        "failed":    len(failed),
-        "skipped":   len(skipped),
-        "total":     len(all_rows),
-        "errors":    [t for t, _ in failed[:10]],
+        "succeeded": succeeded,
+        "failed":    failed,
+        "skipped":   skipped,
+        "total":     total,
+        "errors":    errors,
     }))
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Pivot & CPR Analysis -- Daily Pipeline."
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=MAX_WORKERS,
+        help=f"Number of parallel fetch workers (default: {MAX_WORKERS}). "
+             f"Lower if seeing 429 errors.",
+    )
+    args = parser.parse_args()
+
+    MAX_WORKERS           = args.workers
+    _connection_semaphore = threading.Semaphore(MAX_WORKERS)
+
     main()
