@@ -74,8 +74,8 @@ EXCHANGE       = "NSE"
 IST            = pytz.timezone("Asia/Kolkata")
 UPSERT_BATCH   = 50
 N_DAILY_BARS   = 5
-N_WEEKLY_BARS  = 5
-N_MONTHLY_BARS = 5
+N_WEEKLY_BARS  = 6
+N_MONTHLY_BARS = 6
 SLEEP_BETWEEN  = 0.3    # seconds between each fetch within a worker
 
 # ── Parallelism & rate limiting ───────────────────────────────────────────────
@@ -304,28 +304,47 @@ def process_ticker(
         return (ticker, None, f"Insufficient daily data ({len(df_d) if df_d is not None else 0} bars)")
 
     # ── Daily ─────────────────────────────────────────────────────────────────
-    bar_d0 = _row_to_bar(df_d.iloc[-1])   # today's completed bar — pivot source
-    bar_d1 = _row_to_bar(df_d.iloc[-2])   # yesterday — boundary
+    # bar_d0 = today's completed bar    → LTP source, pdh/pdl, tomorrow's pivot source
+    # bar_d1 = yesterday's completed    → TODAY's pivot source (compare LTP against this)
+    # bar_d2 = D-2 completed            → boundary for today's CPR, yesterday's pivot source
+    bar_d0 = _row_to_bar(df_d.iloc[-1])
+    bar_d1 = _row_to_bar(df_d.iloc[-2])
     bar_d2 = _row_to_bar(df_d.iloc[-3]) if len(df_d) >= 3 else bar_d1
 
-    ltp = bar_d0.close
+    ltp = bar_d0.close   # today's closing price
 
-    lvl_tomorrow = compute_cpr(bar_d0, bar_d1)    # tomorrow's pivot levels
-    lvl_today    = compute_cpr(bar_d1, bar_d2)    # today's pivot levels (for 2-day compare)
+    # Tomorrow's CPR — built from today's H/L/C → used for width + 2-day relationship
+    lvl_tomorrow = compute_cpr(bar_d0, bar_d1)
 
-    daily_trend           = determine_trend(ltp, lvl_tomorrow)
-    width_classification  = classify_cpr_width(cpr_width_pct(lvl_tomorrow))
-    cpr_2day_relationship = determine_2day_cpr(lvl_tomorrow, lvl_today)
+    # Today's CPR — built from yesterday's H/L/C → LTP is evaluated against THIS.
+    # Pivot Point convention: today's price vs today's PP levels (derived from yesterday).
+    # Comparing LTP against a CPR built from the SAME bar always produces NEUTRAL/BEARISH
+    # because close is geometrically inside its own H/L/C-derived CPR band.
+    lvl_today = compute_cpr(bar_d1, bar_d2)
+
+    daily_trend           = determine_trend(ltp, lvl_today)            # LTP vs today's levels
+    width_classification  = classify_cpr_width(cpr_width_pct(lvl_tomorrow))  # tomorrow's width
+    cpr_2day_relationship = determine_2day_cpr(lvl_tomorrow, lvl_today)      # tomorrow vs today
 
     # ── Weekly ────────────────────────────────────────────────────────────────
+    # Use the previous completed week as pivot source (iloc[-2]) so LTP can
+    # genuinely be above/below that week's levels. The current week (iloc[-1])
+    # is still forming — comparing LTP against it causes the same inside-band issue.
     weekly_trend = "UNKNOWN"
-    if df_w is not None and len(df_w) >= 2:
+    if df_w is not None and len(df_w) >= 3:
+        lvl_w = compute_cpr(_row_to_bar(df_w.iloc[-2]), _row_to_bar(df_w.iloc[-3]))
+        weekly_trend = determine_trend(ltp, lvl_w)
+    elif df_w is not None and len(df_w) >= 2:
         lvl_w = compute_cpr(_row_to_bar(df_w.iloc[-1]), _row_to_bar(df_w.iloc[-2]))
         weekly_trend = determine_trend(ltp, lvl_w)
 
     # ── Monthly ───────────────────────────────────────────────────────────────
+    # Same logic: previous completed month as pivot source.
     monthly_trend = "UNKNOWN"
-    if df_m is not None and len(df_m) >= 2:
+    if df_m is not None and len(df_m) >= 3:
+        lvl_m = compute_cpr(_row_to_bar(df_m.iloc[-2]), _row_to_bar(df_m.iloc[-3]))
+        monthly_trend = determine_trend(ltp, lvl_m)
+    elif df_m is not None and len(df_m) >= 2:
         lvl_m = compute_cpr(_row_to_bar(df_m.iloc[-1]), _row_to_bar(df_m.iloc[-2]))
         monthly_trend = determine_trend(ltp, lvl_m)
 
@@ -337,8 +356,8 @@ def process_ticker(
         "daily_trend":           daily_trend,
         "cpr_2day_relationship": cpr_2day_relationship,
         "width_classification":  width_classification,
-        "pdh":                   round(bar_d0.high, 2),
-        "pdl":                   round(bar_d0.low,  2),
+        "pdh":                   round(bar_d0.high, 2),   # today's high = tomorrow's PDH
+        "pdl":                   round(bar_d0.low,  2),   # today's low  = tomorrow's PDL
         "last_updated":          now_utc,
     }
 
