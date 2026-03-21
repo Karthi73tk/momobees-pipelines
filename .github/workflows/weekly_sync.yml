@@ -1,0 +1,96 @@
+# .github/workflows/weekly_sync.yml
+#
+# Runs every Friday at 5:00 PM IST = 11:30 UTC Friday.
+# IST is UTC+5:30, so 17:00 IST = 11:30 UTC.
+#
+# Each script writes results/SCRIPT.json with succeeded/failed/skipped counts.
+# The final step reads both files and sends one consolidated Telegram message.
+
+name: Weekly Sync (Friday 5:00 PM IST)
+
+on:
+  schedule:
+    - cron: '30 11 * * 5'   # 11:30 UTC Friday = 5:00 PM IST Friday
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+
+jobs:
+  weekly-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      NEXT_PUBLIC_SUPABASE_URL:  ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TELEGRAM_BOT_TOKEN:        ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:          ${{ secrets.TELEGRAM_CHAT_ID }}
+      BENCHMARK_TICKER:          NIFTY
+      BENCHMARK_EXCHANGE:        NSE
+      STOCK_EXCHANGE:            NSE
+      LOOKBACK_PERIODS:          150
+      TAIL_PERIODS:              12
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Step 1: Stage Analysis ─────────────────────────────────────────────
+      - name: Run stage_analysis_pipeline_w.py
+        run: python scripts/stage_analysis_pipeline_w.py
+        continue-on-error: true
+
+      # ── Step 2: RRG Pipeline ───────────────────────────────────────────────
+      - name: Run rrg_pipeline_w.py
+        run: python scripts/rrg_pipeline_w.py
+        continue-on-error: true
+
+      # ── Send one consolidated Telegram summary ─────────────────────────────
+      - name: Send Telegram summary
+        if: always()
+        run: |
+          python - <<'EOF'
+          import json, pathlib
+          from notify import send_telegram
+
+          result_files = [
+              ("results/stage.json", "Stage Analysis (Weekly)"),
+              ("results/rrg.json",   "RRG Pipeline (Weekly)"),
+          ]
+
+          lines = ["📅 <b>Weekly Sync Summary</b>\n"]
+
+          for path, fallback_name in result_files:
+              p = pathlib.Path(path)
+              if not p.exists():
+                  lines.append(f"❌ <b>{fallback_name}</b> — crashed before writing result\n")
+                  continue
+
+              r = json.loads(p.read_text())
+              icon = "✅" if r["failed"] == 0 else "⚠️"
+              lines.append(
+                  f"{icon} <b>{r['script']}</b>\n"
+                  f"   ✔ {r['succeeded']} succeeded  "
+                  f"✖ {r['failed']} failed  "
+                  f"⏭ {r['skipped']} skipped"
+              )
+              if r.get("errors"):
+                  tickers = ", ".join(r["errors"])
+                  lines.append(f"   <code>{tickers}</code>")
+              lines.append("")
+
+          send_telegram("\n".join(lines))
+          EOF

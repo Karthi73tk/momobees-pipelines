@@ -1,0 +1,111 @@
+# .github/workflows/daily_sync.yml
+#
+# Runs Mon–Fri at 4:30 AM IST = 23:00 UTC (previous calendar day).
+# IST is UTC+5:30, so 4:30 IST = 23:00 UTC the night before.
+#
+# Each script writes results/SCRIPT.json with succeeded/failed/skipped counts.
+# The final step reads all four files and sends one consolidated Telegram message.
+
+name: Daily Sync (Mon–Fri 4:30 AM IST)
+
+on:
+  schedule:
+    - cron: '0 23 * * 0-4'   # 23:00 UTC Sun–Thu = 4:30 AM IST Mon–Fri
+  workflow_dispatch:           # allow manual trigger from GitHub UI
+
+jobs:
+  daily-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      NEXT_PUBLIC_SUPABASE_URL:  ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TELEGRAM_BOT_TOKEN:        ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:          ${{ secrets.TELEGRAM_CHAT_ID }}
+      BENCHMARK_TICKER:          NIFTY
+      BENCHMARK_EXCHANGE:        NSE
+      STOCK_EXCHANGE:            NSE
+      LOOKBACK_PERIODS:          150
+      TAIL_PERIODS:              12
+      # pivot_analysis uses these legacy var names
+      SUPABASE_URL:              ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ── Step 1: NSE All Universe Sync ──────────────────────────────────────
+      - name: Run data_sync_engine_nse_all_d.py
+        run: python scripts/data_sync_engine_nse_all_d.py
+        continue-on-error: true
+
+      # ── Step 2: N750 Data Sync ─────────────────────────────────────────────
+      - name: Run data_sync_engine_n750_d.py
+        run: python scripts/data_sync_engine_n750_d.py
+        continue-on-error: true
+
+      # ── Step 3: Market Pulse Global ────────────────────────────────────────
+      - name: Run market_pulse_global_d.py
+        run: python scripts/market_pulse_global_d.py
+        continue-on-error: true
+
+      # ── Step 4: Pivot Analysis ─────────────────────────────────────────────
+      - name: Run pivot_analysis_d.py
+        run: python scripts/pivot_analysis_d.py
+        continue-on-error: true
+
+      # ── Send one consolidated Telegram summary ─────────────────────────────
+      - name: Send Telegram summary
+        if: always()
+        run: |
+          python - <<'EOF'
+          import json, pathlib
+          from notify import send_telegram
+
+          result_files = [
+              ("results/nse_all.json",     "NSE All Universe Sync"),
+              ("results/n750.json",        "N750 Data Sync"),
+              ("results/market_pulse.json","Market Pulse Global"),
+              ("results/pivot.json",       "Pivot Analysis"),
+          ]
+
+          lines = ["🗓 <b>Daily Sync Summary</b>\n"]
+
+          for path, fallback_name in result_files:
+              p = pathlib.Path(path)
+              if not p.exists():
+                  lines.append(f"❌ <b>{fallback_name}</b> — crashed before writing result\n")
+                  continue
+
+              r = json.loads(p.read_text())
+              icon = "✅" if r["failed"] == 0 else "⚠️"
+              lines.append(
+                  f"{icon} <b>{r['script']}</b>\n"
+                  f"   ✔ {r['succeeded']} succeeded  "
+                  f"✖ {r['failed']} failed  "
+                  f"⏭ {r['skipped']} skipped"
+              )
+              if r.get("errors"):
+                  tickers = ", ".join(r["errors"])
+                  lines.append(f"   <code>{tickers}</code>")
+              lines.append("")
+
+          send_telegram("\n".join(lines))
+          EOF
