@@ -57,7 +57,7 @@ MARKETS: list[dict] = [
     # Americas
     {"region": "Americas",     "country": "USA",         "index_name": "S&P 500",           "ticker": "SP:SPX"},
     {"region": "Americas",     "country": "USA",         "index_name": "NASDAQ 100",         "ticker": "TVC:NDX"},
-    {"region": "Americas",     "country": "Canada",      "index_name": "S&P/TSX Composite",  "ticker": "TSX:OSPTSX"},
+    {"region": "Americas",     "country": "Canada",      "index_name": "S&P/TSX Composite",  "ticker": "TSX:TSX"},
     {"region": "Americas",     "country": "Brazil",      "index_name": "Bovespa",            "ticker": "BMFBOVESPA:IBOV"},
     # Asia-Pacific
     {"region": "Asia-Pacific", "country": "India",       "index_name": "Nifty 50",           "ticker": "NSE:NIFTY"},
@@ -68,9 +68,9 @@ MARKETS: list[dict] = [
     {"region": "Asia-Pacific", "country": "Australia",   "index_name": "ASX 200",            "ticker": "ASX:XJO"},
     # Europe
     {"region": "Europe",       "country": "Germany",     "index_name": "DAX 40",             "ticker": "TVC:DAX"},
-    {"region": "Europe",       "country": "UK",          "index_name": "FTSE 100",           "ticker": "TVC:UKX"},
-    {"region": "Europe",       "country": "France",      "index_name": "CAC 40",             "ticker": "TVC:CAC40"},
-    {"region": "Europe",       "country": "Pan-European","index_name": "Euro Stoxx 50",      "ticker": "EURONEXT:SX5E"},
+    {"region": "Europe",       "country": "UK",          "index_name": "FTSE 100",           "ticker": "FTSE:UKX"},
+    {"region": "Europe",       "country": "France",      "index_name": "CAC 40",             "ticker": "EURONEXT:PX1"},
+    {"region": "Europe",       "country": "Pan-European","index_name": "Euro Stoxx 50",      "ticker": "TVC:SX5E"},
 ]
 
 # How many daily bars to fetch (need at least 252 for 52-week high/low + EMAs)
@@ -78,15 +78,17 @@ BARS = 300
 
 # Fallback tickers — tried automatically if the primary returns 0 bars
 TICKER_FALLBACKS: dict[str, list[str]] = {
-    "TSX:OSPTSX":    ["INDEX:TSXC", "TVC:TSX"],
-    "SSE:000001":    ["SZSE:399001", "TVC:SHCOMP"],
-    "ASX:XJO":       ["INDEX:XJO",  "TVC:ASX200"],
-    "EURONEXT:SX5E": ["TVC:EU50",   "EURONEXT:SXXE"],
+    "TSX:TSX":       ["TVC:TSX"],      # Reliable TV-calculated version
+    "SSE:000001":    ["TVC:SHCOMP"],   # Shanghai Composite fallback
+    "ASX:XJO":       ["TVC:XJO"],      # ASX 200 fallback
+    "STOXX:SX5E":    ["TVC:SX5E"],     # Euro Stoxx 50 fallback
+    "FTSE:UKX":      ["TVC:UKX"],      # FTSE 100 fallback
 }
-
-# Retry settings for tvDatafeed (it can be flaky)
-MAX_RETRIES = 3
-RETRY_DELAY = 5  # seconds
+# Retry settings for tvDatafeed
+MAX_RETRIES: int    = 4       # 1 original + 3 retries
+BACKOFF_BASE: float = 2.0     # exponential: 2s -> 4s -> 8s -> 16s
+BACKOFF_MAX: float  = 60.0
+MIN_BARS: int       = 20      # minimum bars to consider a fetch valid
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -173,9 +175,24 @@ def _trend_label(score: float) -> str:
 # DATA FETCH
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return "429" in msg or "too many requests" in msg
+
+
 def _try_fetch(tv: TvDatafeed, ticker: str) -> Optional[pd.DataFrame]:
-    """Try fetching a single ticker with retries. Returns DataFrame or None."""
+    """
+    Fetch a single ticker with exponential backoff retry.
+
+    Retries on:
+      - 429 Too Many Requests  (recreates TvDatafeed instance to drop poisoned connection)
+      - Any other exception    (transient network / WebSocket errors)
+      - Empty / insufficient data response  (also retried — TV can return partial data)
+
+    Returns a DataFrame on success, None after all retries are exhausted.
+    """
     exchange, symbol = ticker.split(":")
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             df = tv.get_hist(
@@ -184,15 +201,51 @@ def _try_fetch(tv: TvDatafeed, ticker: str) -> Optional[pd.DataFrame]:
                 interval=Interval.in_daily,
                 n_bars=BARS,
             )
-            if df is not None and not df.empty and len(df) >= 20:
+
+            if df is not None and not df.empty and len(df) >= MIN_BARS:
                 return df
-            log.warning(f"  [{ticker}] insufficient data ({len(df) if df is not None else 0} bars)")
-            return None
-        except Exception as exc:
-            log.warning(f"  [{ticker}] attempt {attempt}/{MAX_RETRIES} failed: {exc}")
+
+            # Insufficient data — retry in case TV returned a partial response
+            bars_got = len(df) if df is not None else 0
             if attempt < MAX_RETRIES:
-                time.sleep(RETRY_DELAY)
-    log.error(f"  [{ticker}] all retries exhausted")
+                wait = min(BACKOFF_BASE ** attempt, BACKOFF_MAX)
+                log.warning(
+                    "  [%s] insufficient data (%d bars) attempt %d/%d -- retrying in %.0fs ...",
+                    ticker, bars_got, attempt, MAX_RETRIES, wait,
+                )
+                time.sleep(wait)
+            else:
+                log.error("  [%s] insufficient data (%d bars) after %d attempts.", ticker, bars_got, MAX_RETRIES)
+                return None
+
+        except Exception as exc:
+            is_429 = _is_rate_limit_error(exc)
+
+            if attempt < MAX_RETRIES:
+                wait = min(BACKOFF_BASE ** attempt, BACKOFF_MAX)
+                if is_429:
+                    # Recreate the TvDatafeed instance — the WebSocket may be poisoned
+                    try:
+                        tv.__init__()
+                    except Exception:
+                        pass
+                    log.warning(
+                        "  [%s] 429 Too Many Requests attempt %d/%d -- backing off %.0fs ...",
+                        ticker, attempt, MAX_RETRIES, wait,
+                    )
+                else:
+                    log.warning(
+                        "  [%s] %s: %s attempt %d/%d -- retrying in %.0fs ...",
+                        ticker, type(exc).__name__, exc, attempt, MAX_RETRIES, wait,
+                    )
+                time.sleep(wait)
+            else:
+                log.error(
+                    "  [%s] giving up after %d attempts. Last error: %s: %s",
+                    ticker, MAX_RETRIES, type(exc).__name__, exc,
+                )
+                return None
+
     return None
 
 
