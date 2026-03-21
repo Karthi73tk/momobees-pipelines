@@ -1,5 +1,5 @@
 supabase>=2.0.0
-tvDatafeed>=2.3.0
+tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git
 tradingview-screener>=0.5.0
 pandas>=2.0.0
 numpy>=1.24.0
