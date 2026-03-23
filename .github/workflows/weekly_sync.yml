@@ -10,7 +10,7 @@ name: Weekly Sync (Friday 5:00 PM IST)
 
 on:
   schedule:
-    - cron: '30 11 * * 5'   # 11:30 UTC Friday = 5:00 PM IST Friday
+    - cron: '0 23 * * 0-4'   # 23:00 UTC Sun-Thu = 4:30 AM IST Mon-Fri
   workflow_dispatch:          # allow manual trigger from GitHub UI
 
 jobs:
