@@ -6,12 +6,11 @@
 # Each script writes results/SCRIPT.json with succeeded/failed/skipped counts.
 # The final step reads all four files and sends one consolidated Telegram message.
 
-name: Daily Sync (Mon–Fri 4:30 AM IST)
+name: Daily Sync (Mon–Fri 4:30 PM IST)
 
 on:
   schedule:
-    - cron: '0 23 * * 0-4'   # 23:00 UTC Sun–Thu = 4:30 AM IST Mon–Fri
-    timezone: 'Asia/Kolkata'
+    - cron: '0 11 * * 1-5'   # 23:00 UTC Sun–Thu = 4:30 AM IST Mon–Fri
   workflow_dispatch:           # allow manual trigger from GitHub UI
 
 jobs:
