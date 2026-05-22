@@ -10,6 +10,7 @@ Environment variables required:
 
 If either variable is missing, send_telegram() logs a warning and returns
 silently so scripts still complete even if notifications are misconfigured.
+Github wakeup
 """
 
 import os
