@@ -4,7 +4,7 @@
 # IST is UTC+5:30, so 17:00 IST = 11:30 UTC.
 #
 # Each script writes results/SCRIPT.json with succeeded/failed/skipped counts.
-# The final step reads both files and sends one consolidated Telegram message.
+# The final step reads all three files and sends one consolidated Telegram message.
 
 name: Weekly Sync (Friday 5:00 PM IST)
 
@@ -58,6 +58,16 @@ jobs:
         run: python scripts/rrg_pipeline_w.py
         continue-on-error: true
 
+      # ── Step 3: Universe Sync (Total Market N750) ──────────────────────────
+      # Rebuilds universe.n750 from the official Nifty Total Market constituent
+      # list. Add --remove-missing below if you want tickers dropped from the
+      # index to be deleted from the table automatically each week; left off
+      # by default so index rebalance edge cases don't silently delete rows
+      # without a human glancing at the summary first.
+      - name: Run sync_total_market_n750.py
+        run: python scripts/sync_total_market_n750.py
+        continue-on-error: true
+
       # ── Send one consolidated Telegram summary ─────────────────────────────
       - name: Send Telegram summary
         if: always()
@@ -67,8 +77,9 @@ jobs:
           from notify import send_telegram
 
           result_files = [
-              ("results/stage.json", "Stage Analysis (Weekly)"),
-              ("results/rrg.json",   "RRG Pipeline (Weekly)"),
+              ("results/stage.json",        "Stage Analysis (Weekly)"),
+              ("results/rrg.json",          "RRG Pipeline (Weekly)"),
+              ("results/universe_sync.json","Universe Sync (N750)"),
           ]
 
           lines = ["📅 <b>Weekly Sync Summary</b>\n"]
