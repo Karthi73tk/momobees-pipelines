@@ -4,7 +4,7 @@
 # IST is UTC+5:30, so 4:30 IST = 23:00 UTC the night before.
 #
 # Each script writes results/SCRIPT.json with succeeded/failed/skipped counts.
-# The final step reads all four files and sends one consolidated Telegram message.
+# The final step reads all five files and sends one consolidated Telegram message.
 
 name: Daily Sync (Mon–Fri 4:30 PM IST)
 
@@ -71,6 +71,11 @@ jobs:
         run: python scripts/pivot_analysis_d.py
         continue-on-error: true
 
+      # ── Step 5: Momentum Scanner (N750) ────────────────────────────────────
+      - name: Run momentum_scanner.py
+        run: python scripts/momentum_scanner.py
+        continue-on-error: true
+
       # ── Send one consolidated Telegram summary ─────────────────────────────
       - name: Send Telegram summary
         if: always()
@@ -84,6 +89,7 @@ jobs:
               ("results/n750.json",        "N750 Data Sync"),
               ("results/market_pulse.json","Market Pulse Global"),
               ("results/pivot.json",       "Pivot Analysis"),
+              ("results/momentum.json",    "Momentum Scanner (N750)"),
           ]
 
           lines = ["🗓 <b>Daily Sync Summary</b>\n"]
