@@ -1,7 +1,7 @@
 """
 Total_Market_N750 — Universe Sync Pipeline
 --------------------------------------------
-Rebuilds the `Total_Market_N750` table from the official Nifty Total Market
+Rebuilds the `universe.n750` table from the official Nifty Total Market
 index constituent list, enriched with sector/industry from TradingView, and
 validated against tvDatafeed (only tickers that actually return live data
 get upserted).
@@ -14,8 +14,8 @@ Flow:
     3. Join (1) and (2) on the remapped ticker
     4. Validate every ticker against `tvDatafeed` (parallel, retry w/ backoff)
          -> fetch latest close only; ticker is only kept if this succeeds
-    5. Upsert PASSING tickers only into Supabase `Total_Market_N750`
-         (optionally mark tickers no longer in the index as is_active=False)
+    5. Upsert PASSING tickers only into Supabase `universe.n750`
+         (optionally delete rows for tickers no longer in the index)
 
 NOTE ON THE CSV: niftyindices.com columns have shifted over the years between
 runs of "Company Name,Industry,Symbol,Series,ISIN Code" and similar variants.
@@ -31,9 +31,9 @@ Usage:
         # skip the tvDatafeed check entirely (upsert everything that has a TV sector match)
     python sync_total_market_n750.py --workers 6
         # override tvDatafeed parallel worker count (default: 4)
-    python sync_total_market_n750.py --deactivate-missing
-        # additionally set is_active=False for tickers currently active in the
-        # DB but no longer present in the fresh constituent list
+    python sync_total_market_n750.py --remove-missing
+        # additionally delete rows for tickers currently in the DB but no
+        # longer present in the fresh constituent list
 
 Requirements:
     pip install supabase tradingview-screener tvDatafeed pandas requests tqdm python-dotenv
@@ -60,7 +60,8 @@ load_dotenv(".env.local")
 # ── Config ────────────────────────────────────────────────────────────────────
 NIFTY_CSV_URL = "https://www.niftyindices.com/IndexConstituent/ind_niftytotalmarket_list.csv"
 DEFAULT_EXCHANGE = "NSE"
-UNIVERSE_TABLE = "Total_Market_N750"
+UNIVERSE_SCHEMA = "universe"
+UNIVERSE_TABLE = "n750"
 BATCH_SIZE = 100
 
 SUPABASE_URL = (
@@ -396,46 +397,44 @@ def upsert_universe(sb, passing: pd.DataFrame) -> None:
         for _, row in passing.iterrows()
     ]
 
-    print(f"\nUpserting {len(payload)} validated rows into {UNIVERSE_TABLE} ...")
+    print(f"\nUpserting {len(payload)} validated rows into {UNIVERSE_SCHEMA}.{UNIVERSE_TABLE} ...")
     for i in range(0, len(payload), BATCH_SIZE):
         batch = payload[i : i + BATCH_SIZE]
-        sb.table(UNIVERSE_TABLE).upsert(batch, on_conflict="ticker").execute()
+        sb.schema(UNIVERSE_SCHEMA).table(UNIVERSE_TABLE).upsert(batch, on_conflict="ticker").execute()
     print(f"  Done. Upserted {len(payload)} rows.")
 
 
-def deactivate_missing(sb, index_df: pd.DataFrame) -> None:
+def remove_missing(sb, index_df: pd.DataFrame) -> None:
     """
-    Set is_active=False for tickers currently active in the DB but absent
-    from the fresh Nifty Total Market constituent list.
+    Delete rows from the DB for tickers that are no longer present in the
+    fresh Nifty Total Market constituent list (i.e. hard-remove index
+    rebalance dropouts, rather than flagging them with is_active=False).
 
     IMPORTANT: `index_df` should be the full CSV-matched universe (`merged`),
     NOT the tvDatafeed-validated subset (`passing`). A ticker that's still a
     genuine index constituent but happened to fail tvDatafeed validation this
-    run (e.g. a transient connection drop) must NOT be deactivated -- it's
-    still real, it just didn't get its price/sector refreshed this run and
-    will very likely succeed next run. Only true index rebalance removals
-    (ticker no longer in the CSV at all) should flip is_active to False.
+    run (e.g. a transient connection drop) must NOT be removed -- it's still
+    real, it just didn't get its price/sector refreshed this run and will
+    very likely succeed next run. Only true index rebalance removals (ticker
+    no longer in the CSV at all) should be deleted.
     """
     fresh_tickers = set(index_df["ticker"])
 
-    resp = sb.table(UNIVERSE_TABLE).select("ticker").eq("is_active", True).execute()
-    current_active = {r["ticker"] for r in (resp.data or [])}
+    resp = sb.schema(UNIVERSE_SCHEMA).table(UNIVERSE_TABLE).select("ticker").execute()
+    current_tickers = {r["ticker"] for r in (resp.data or [])}
 
-    to_deactivate = current_active - fresh_tickers
-    if not to_deactivate:
-        print("No tickers to deactivate -- DB active set matches fresh list.")
+    to_remove = current_tickers - fresh_tickers
+    if not to_remove:
+        print("No tickers to remove -- DB ticker set matches fresh list.")
         return
 
-    print(f"Deactivating {len(to_deactivate)} tickers no longer in the constituent list ...")
-    now = datetime.now(timezone.utc).isoformat()
-    tickers_list = list(to_deactivate)
+    print(f"Removing {len(to_remove)} tickers no longer in the constituent list ...")
+    tickers_list = list(to_remove)
     for i in range(0, len(tickers_list), BATCH_SIZE):
         batch = tickers_list[i : i + BATCH_SIZE]
-        sb.table(UNIVERSE_TABLE).update(
-            {"is_active": False, "updated_at": now}
-        ).in_("ticker", batch).execute()
-    print(f"  Done. Deactivated {len(to_deactivate)} tickers.")
-    print(f"  Tickers: {sorted(to_deactivate)[:20]}{' ...' if len(to_deactivate) > 20 else ''}")
+        sb.schema(UNIVERSE_SCHEMA).table(UNIVERSE_TABLE).delete().in_("ticker", batch).execute()
+    print(f"  Done. Removed {len(to_remove)} tickers.")
+    print(f"  Tickers: {sorted(to_remove)[:20]}{' ...' if len(to_remove) > 20 else ''}")
 
 
 # =============================================================================
@@ -447,9 +446,9 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Fetch and print/save only -- no DB writes.")
     parser.add_argument("--save", type=str, default=None, help="Optional CSV path to save the merged result.")
     parser.add_argument(
-        "--deactivate-missing",
+        "--remove-missing",
         action="store_true",
-        help="Also set is_active=False for tickers no longer present in the fresh CSV constituent list "
+        help="Delete rows for tickers no longer present in the fresh CSV constituent list "
              "(index rebalance removals) -- independent of tvDatafeed validation outcome.",
     )
     parser.add_argument(
@@ -499,8 +498,8 @@ def main():
     sb = get_sb()
     upsert_universe(sb, passing)
 
-    if args.deactivate_missing:
-        deactivate_missing(sb, merged)
+    if args.remove_missing:
+        remove_missing(sb, merged)
 
 
 if __name__ == "__main__":
