@@ -80,7 +80,9 @@ SUPABASE_KEY: str = (
     or os.environ.get("NEXT_PUBLIC_SUPABASE_ANON_KEY", "")
 )
 
-UNIVERSE_TABLE: str = "stock_universe_nse_all"
+UNIVERSE_SCHEMA: str = "universe"
+UNIVERSE_TABLE: str = "nse_universe"
+STAGES_SCHEMA: str   = "stage"
 STAGES_TABLE: str   = "weekly_stock_stages"
 
 # ── Exchange / market ─────────────────────────────────────────────────────────
@@ -267,7 +269,7 @@ def fetch_all_tickers(supabase: Client) -> List[dict]:
     all_rows, page, page_size = [], 0, 1000
     while True:
         resp = (
-            supabase.table(UNIVERSE_TABLE)
+            supabase.schema(UNIVERSE_SCHEMA).table(UNIVERSE_TABLE)
             .select("ticker, sector, industry, company_name")
             .eq("is_active", True)
             .range(page * page_size, (page + 1) * page_size - 1)
@@ -296,7 +298,7 @@ def get_already_processed_today(supabase: Client, today_str: str) -> Set[str]:
 
     while True:
         resp = (
-            supabase.table(STAGES_TABLE)
+            supabase.schema(STAGES_SCHEMA).table(STAGES_TABLE)
             .select("ticker")
             .gte("updated_at", today_start)
             .lte("updated_at", today_end)
@@ -325,7 +327,7 @@ def flush_batch(supabase: Client, records: List[dict]) -> None:
     if not records:
         return
     try:
-        supabase.table(STAGES_TABLE).upsert(
+        supabase.schema(STAGES_SCHEMA).table(STAGES_TABLE).upsert(
             records, on_conflict="ticker,analysis_date"
         ).execute()
         log.info("  ^ Flushed %d records to Supabase.", len(records))

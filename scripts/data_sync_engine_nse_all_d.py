@@ -43,7 +43,8 @@ SUPABASE_KEY = (
     os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     or os.environ.get("NEXT_PUBLIC_SUPABASE_ANON_KEY")
 )
-TABLE        = "stock_universe_nse_all"
+SCHEMA       = "universe"
+TABLE        = "nse_universe"
 PAGE_SIZE    = 3000
 PREVIEW_ROWS = 20
 
@@ -259,7 +260,7 @@ def get_already_synced_today(sb, tickers: list) -> set:
         chunk = tickers[i : i + CHUNK]
         try:
             resp = (
-                sb.table(TABLE)
+                sb.schema(SCHEMA).table(TABLE)
                 .select("ticker, updated_at")
                 .in_("ticker", chunk)
                 .gte("updated_at", f"{today_str}T00:00:00+00:00")
@@ -282,7 +283,7 @@ def upsert_rows(sb, rows: list) -> bool:
     """Upsert all rows in a single call. Returns True on success."""
     log.info("Upserting %d rows to %s ...", len(rows), TABLE)
     try:
-        sb.table(TABLE).upsert(rows, on_conflict="ticker").execute()
+        sb.schema(SCHEMA).table(TABLE).upsert(rows, on_conflict="ticker").execute()
         log.info("Upsert complete -- %d rows written.", len(rows))
         return True
     except Exception as exc:

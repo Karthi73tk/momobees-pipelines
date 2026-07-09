@@ -51,6 +51,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+BREADTH_SCHEMA = "market_pulse"
+BREADTH_TABLE  = "global_breadth"
+
 # ── Markets definition ─────────────────────────────────────────────────────────
 # ticker format: "EXCHANGE:SYMBOL"  (as used by TradingView / tvDatafeed)
 MARKETS: list[dict] = [
@@ -370,11 +373,11 @@ def upsert_to_supabase(supabase: Client, rows: list[dict]) -> None:
         clean.append(cr)
 
     result = (
-        supabase.table("global_market_breadth")
+        supabase.schema(BREADTH_SCHEMA).table(BREADTH_TABLE)
         .upsert(clean, on_conflict="ticker")
         .execute()
     )
-    log.info(f"Upserted {len(clean)} rows → global_market_breadth")
+    log.info(f"Upserted {len(clean)} rows → {BREADTH_SCHEMA}.{BREADTH_TABLE}")
     return result
 
 

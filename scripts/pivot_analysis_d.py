@@ -96,6 +96,9 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+PIVOT_SCHEMA = "pivot"
+PIVOT_TABLE  = "trend_analysis"
+
 
 # ---------------------------------------------------------------------------
 # Data containers
@@ -370,7 +373,7 @@ def process_ticker(
 
 def fetch_tickers(client: Client) -> List[dict]:
     """Return all rows from pivot_trend_analysis."""
-    response = client.table("pivot_trend_analysis").select("ticker, last_updated").execute()
+    response = client.schema(PIVOT_SCHEMA).table(PIVOT_TABLE).select("ticker, last_updated").execute()
     return response.data or []
 
 
@@ -396,7 +399,7 @@ def flush_batch(client: Client, rows: List[dict]) -> None:
     if not rows:
         return
     try:
-        client.table("pivot_trend_analysis").upsert(
+        client.schema(PIVOT_SCHEMA).table(PIVOT_TABLE).upsert(
             rows, on_conflict="ticker"
         ).execute()
         log.info("  ^ Flushed %d records to Supabase.", len(rows))

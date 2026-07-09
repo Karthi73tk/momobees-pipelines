@@ -59,8 +59,10 @@ SUPABASE_KEY = (
     or os.environ.get("NEXT_PUBLIC_SUPABASE_ANON_KEY", "")
 )
 
-UNIVERSE_TABLE   = "Total_Market_N750"
-METRICS_TABLE    = "stock_metrics"
+UNIVERSE_SCHEMA  = "universe"
+UNIVERSE_TABLE   = "n750"
+METRICS_SCHEMA   = "screener"
+METRICS_TABLE    = "n750_metrics"
 DEFAULT_EXCHANGE = "NSE"
 BENCHMARK_SYMBOL = "NIFTY_TOTAL_MKT"
 
@@ -121,7 +123,7 @@ def get_sb() -> Client:
 
 def fetch_universe(sb: Client) -> List[dict]:
     resp = (
-        sb.table(UNIVERSE_TABLE)
+        sb.schema(UNIVERSE_SCHEMA).table(UNIVERSE_TABLE)
         .select("ticker, exchange")
         .eq("is_active", True)
         .execute()
@@ -131,7 +133,7 @@ def fetch_universe(sb: Client) -> List[dict]:
 
 def fetch_rs_sync_dates(sb: Client) -> Dict[str, Optional[str]]:
     """Return {ticker: rs_synced_at} from stock_metrics for resume logic."""
-    resp = sb.table(METRICS_TABLE).select("ticker, rs_synced_at").execute()
+    resp = sb.schema(METRICS_SCHEMA).table(METRICS_TABLE).select("ticker, rs_synced_at").execute()
     return {r["ticker"]: r.get("rs_synced_at") for r in (resp.data or [])}
 
 
@@ -140,7 +142,7 @@ def flush_phase2_batch(sb: Client, rows: List[dict]) -> None:
     if not rows:
         return
     try:
-        sb.table(METRICS_TABLE).upsert(rows, on_conflict="ticker").execute()
+        sb.schema(METRICS_SCHEMA).table(METRICS_TABLE).upsert(rows, on_conflict="ticker").execute()
         log.info("  ^ Flushed %d Phase 2 records to Supabase.", len(rows))
     except Exception as exc:
         log.error(
@@ -455,14 +457,14 @@ def run_sync() -> None:
 
     if p1_universe:
         for i in range(0, len(p1_universe), BATCH):
-            sb.table(UNIVERSE_TABLE).upsert(
+            sb.schema(UNIVERSE_SCHEMA).table(UNIVERSE_TABLE).upsert(
                 p1_universe[i : i + BATCH], on_conflict="ticker"
             ).execute()
         log.info("Phase 1: upserted %d rows to %s.", len(p1_universe), UNIVERSE_TABLE)
 
     if p1_metrics:
         for i in range(0, len(p1_metrics), BATCH):
-            sb.table(METRICS_TABLE).upsert(
+            sb.schema(METRICS_SCHEMA).table(METRICS_TABLE).upsert(
                 p1_metrics[i : i + BATCH], on_conflict="ticker"
             ).execute()
         log.info("Phase 1: upserted %d rows to %s.", len(p1_metrics), METRICS_TABLE)

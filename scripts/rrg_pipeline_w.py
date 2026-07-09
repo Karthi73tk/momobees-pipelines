@@ -74,8 +74,10 @@ SUPABASE_KEY: str = (
     or os.environ.get("NEXT_PUBLIC_SUPABASE_ANON_KEY", "")
 )
 
-UNIVERSE_TABLE: str = "stock_universe_nse_all"
-RRG_TABLE: str      = "rrg_data"
+UNIVERSE_SCHEMA: str = "universe"
+UNIVERSE_TABLE: str = "nse_universe"
+RRG_SCHEMA: str      = "rrg"
+RRG_TABLE: str      = "data"
 
 # ── Exchange / benchmark ──────────────────────────────────────────────────────
 BENCHMARK_TICKER: str   = os.getenv("BENCHMARK_TICKER",   "NIFTY")
@@ -137,7 +139,7 @@ def fetch_tickers(supabase: Client) -> List[str]:
 
     while True:
         response = (
-            supabase.table(UNIVERSE_TABLE)
+            supabase.schema(UNIVERSE_SCHEMA).table(UNIVERSE_TABLE)
             .select("ticker")
             .eq("is_active", True)
             .range(offset, offset + page_size - 1)
@@ -172,7 +174,7 @@ def fetch_already_updated_tickers(supabase: Client, today_str: str) -> Set[str]:
 
     while True:
         response = (
-            supabase.table(RRG_TABLE)
+            supabase.schema(RRG_SCHEMA).table(RRG_TABLE)
             .select("ticker, updated_at")
             .eq("timeframe", TIMEFRAME)
             .eq("benchmark_ticker", BENCHMARK_TICKER)
@@ -399,7 +401,7 @@ def flush_batch(supabase: Client, records: List[dict]) -> int:
     if not records:
         return 0
     try:
-        supabase.table(RRG_TABLE).upsert(
+        supabase.schema(RRG_SCHEMA).table(RRG_TABLE).upsert(
             records,
             on_conflict="ticker,date,timeframe,benchmark_ticker",
         ).execute()
