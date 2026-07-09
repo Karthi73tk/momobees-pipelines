@@ -41,7 +41,9 @@ Requirements:
 
 import argparse
 import io
+import json
 import os
+import pathlib
 import random
 import sys
 import threading
@@ -404,7 +406,7 @@ def upsert_universe(sb, passing: pd.DataFrame) -> None:
     print(f"  Done. Upserted {len(payload)} rows.")
 
 
-def remove_missing(sb, index_df: pd.DataFrame) -> None:
+def remove_missing(sb, index_df: pd.DataFrame) -> int:
     """
     Delete rows from the DB for tickers that are no longer present in the
     fresh Nifty Total Market constituent list (i.e. hard-remove index
@@ -417,6 +419,8 @@ def remove_missing(sb, index_df: pd.DataFrame) -> None:
     real, it just didn't get its price/sector refreshed this run and will
     very likely succeed next run. Only true index rebalance removals (ticker
     no longer in the CSV at all) should be deleted.
+
+    Returns the number of tickers removed.
     """
     fresh_tickers = set(index_df["ticker"])
 
@@ -426,7 +430,7 @@ def remove_missing(sb, index_df: pd.DataFrame) -> None:
     to_remove = current_tickers - fresh_tickers
     if not to_remove:
         print("No tickers to remove -- DB ticker set matches fresh list.")
-        return
+        return 0
 
     print(f"Removing {len(to_remove)} tickers no longer in the constituent list ...")
     tickers_list = list(to_remove)
@@ -435,6 +439,19 @@ def remove_missing(sb, index_df: pd.DataFrame) -> None:
         sb.schema(UNIVERSE_SCHEMA).table(UNIVERSE_TABLE).delete().in_("ticker", batch).execute()
     print(f"  Done. Removed {len(to_remove)} tickers.")
     print(f"  Tickers: {sorted(to_remove)[:20]}{' ...' if len(to_remove) > 20 else ''}")
+    return len(to_remove)
+
+
+def _write_result(succeeded: int, failed: int, skipped: int, total: int, errors: list) -> None:
+    pathlib.Path("results").mkdir(exist_ok=True)
+    pathlib.Path("results/universe_sync.json").write_text(json.dumps({
+        "script":    "Universe Sync (N750)",
+        "succeeded": succeeded,
+        "failed":    failed,
+        "skipped":   skipped,
+        "total":     total,
+        "errors":    errors,
+    }))
 
 
 # =============================================================================
@@ -442,7 +459,7 @@ def remove_missing(sb, index_df: pd.DataFrame) -> None:
 # =============================================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Sync Total_Market_N750 from Nifty Total Market index.")
+    parser = argparse.ArgumentParser(description="Sync universe.n750 from Nifty Total Market index.")
     parser.add_argument("--dry-run", action="store_true", help="Fetch and print/save only -- no DB writes.")
     parser.add_argument("--save", type=str, default=None, help="Optional CSV path to save the merged result.")
     parser.add_argument(
@@ -498,8 +515,21 @@ def main():
     sb = get_sb()
     upsert_universe(sb, passing)
 
+    removed_count = 0
     if args.remove_missing:
-        remove_missing(sb, merged)
+        removed_count = remove_missing(sb, merged)
+
+    # ── Write result JSON for GitHub Actions summary ──────────────────────────
+    errors = [f["ticker"] for f in failures[:10]]
+    if removed_count:
+        errors = errors + [f"(removed {removed_count} delisted tickers)"]
+    _write_result(
+        succeeded=len(passing),
+        failed=len(failures),
+        skipped=0,
+        total=len(merged),
+        errors=errors[:10],
+    )
 
 
 if __name__ == "__main__":
