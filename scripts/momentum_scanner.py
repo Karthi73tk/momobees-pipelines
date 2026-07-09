@@ -59,8 +59,10 @@ Requirements
 import os
 import time
 import random
+import json
 import logging
 import argparse
+import pathlib
 import threading
 from datetime import datetime
 from dataclasses import dataclass
@@ -1018,6 +1020,18 @@ def run_scan(
     }
 
 
+def _write_result(succeeded: int, failed: int, skipped: int, total: int, errors: list) -> None:
+    pathlib.Path("results").mkdir(exist_ok=True)
+    pathlib.Path("results/momentum.json").write_text(json.dumps({
+        "script":    "Momentum Scanner (N750)",
+        "succeeded": succeeded,
+        "failed":    failed,
+        "skipped":   skipped,
+        "total":     total,
+        "errors":    errors,
+    }))
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Momentum Investing Scanner (N750)")
     parser.add_argument(
@@ -1094,3 +1108,13 @@ if __name__ == "__main__":
     print(f"Saved to Supabase {MOMENTUM_SCHEMA}.{MOMENTUM_TABLE}: {out['saved_count']} rows")
     if out["skipped"]:
         print(f"Skipped {len(out['skipped'])} tickers (see log above for details)")
+
+    # ── Write result JSON for GitHub Actions summary ──────────────────────────
+    failed_tickers = [t for t, _reason in out["skipped"]]
+    _write_result(
+        succeeded=len(out["all_results"]) - len(out["skipped"]),
+        failed=len(out["skipped"]),
+        skipped=len(out["invalid_momentum"]),
+        total=len(out["all_results"]),
+        errors=failed_tickers[:10],
+    )
