@@ -4,7 +4,7 @@ Momentum Investing Scanner (N750-TM-T30-W60-RM-M)
 
 Re-implements the rules configured in the "Momentum Investing Scanner" tool
 using:
-  - Supabase table `public."Total_Market_N750"` for the stock universe
+  - Supabase table `universe.n750` for the stock universe
   - tradingview_screener for a fast live-only bulk prefilter
   - tvdatafeed (unofficial TradingView data feed) for OHLCV history
 
@@ -111,7 +111,8 @@ log = logging.getLogger("momentum_scanner")
 # Reads the same .env.local your Next.js app already uses.
 SUPABASE_URL = os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-UNIVERSE_TABLE = "Total_Market_N750"
+UNIVERSE_SCHEMA = "universe"
+UNIVERSE_TABLE = "n750"
 MOMENTUM_SCHEMA = "strategies"
 MOMENTUM_TABLE = "momentum"
 
@@ -229,13 +230,14 @@ class ScanResult:
 
 def get_n750_tickers(client: "Client") -> pd.DataFrame:
     resp = (
-        client.table(UNIVERSE_TABLE)
+        client.schema(UNIVERSE_SCHEMA)
+        .table(UNIVERSE_TABLE)
         .select("ticker, company_name, exchange, is_active")
         .eq("is_active", True)
         .execute()
     )
     df = pd.DataFrame(resp.data)
-    log.info("Fetched %d active tickers from %s", len(df), UNIVERSE_TABLE)
+    log.info("Fetched %d active tickers from %s.%s", len(df), UNIVERSE_SCHEMA, UNIVERSE_TABLE)
     return df
 
 
