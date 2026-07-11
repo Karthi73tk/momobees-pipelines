@@ -139,11 +139,18 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
         log.warning("No momentum picks available — skipping rebalance for portfolio %s", pid)
         raise ValueError("No momentum picks available")
 
+    if len(top_n_tickers) < target_size:
+        log.warning("[%s] Only %d momentum picks available for target size %d", pid, len(top_n_tickers), target_size)
+
     to_exit = [h for h in holdings if h["ticker"] not in top_n_tickers]
     to_enter_tickers = top_n_tickers - held_tickers
 
     all_needed_prices = {h["ticker"] for h in to_exit} | to_enter_tickers
     prices = fetch_ticker_prices(all_needed_prices)
+
+    holding_updates = []
+    holding_inserts = []
+    transaction_inserts = []
 
     # ── Exits ──────────────────────────────────────────────────────────────
     freed_cash = 0.0
@@ -156,21 +163,24 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
         
         freed_cash += float(h["quantity"]) * exit_price
 
-        sb.table("holdings").update({
+        # Prepare holding update
+        holding_updates.append({
+            "id": h["id"],
             "status": "closed",
             "exit_price": exit_price,
             "exit_date": today.isoformat(),
             "exit_reason": "rebalance_exit",
-        }).eq("id", h["id"]).execute()
+        })
 
-        sb.table("transactions").insert({
+        # Prepare transaction insert
+        transaction_inserts.append({
             "portfolio_id": pid,
             "ticker": h["ticker"],
             "quantity": h["quantity"],
             "price": exit_price,
             "type": "SELL",
-        }).execute()
-        log.info("[%s] closed %s @ %.2f (rebalance_exit)", pid, h["ticker"], exit_price)
+        })
+        log.info("[%s] prepared exit for %s @ %.2f (rebalance_exit)", pid, h["ticker"], exit_price)
 
     cash_pool = float(portfolio["remaining_cash"]) + freed_cash
 
@@ -191,24 +201,43 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
             allocation = qty * price
             cash_spent += allocation
 
-            sb.table("holdings").insert({
+            # Prepare holding insert
+            holding_inserts.append({
                 "portfolio_id": pid,
                 "ticker": ticker,
                 "quantity": qty,
                 "entry_price": price,
                 "current_price": price,
                 "status": "open",
-            }).execute()
+            })
 
-            sb.table("transactions").insert({
+            # Prepare transaction insert
+            transaction_inserts.append({
                 "portfolio_id": pid,
                 "ticker": ticker,
                 "quantity": qty,
                 "price": price,
                 "type": "BUY",
-            }).execute()
-            log.info("[%s] entered %s x%d @ %.2f", pid, ticker, qty, price)
+            })
+            log.info("[%s] prepared entry for %s x%d @ %.2f", pid, ticker, qty, price)
 
+    # ── Execute Database Mutations in Batches ──────────────────────────────
+    # 1. Update holdings (close exits)
+    if holding_updates:
+        log.info("[%s] Batch closing %d holdings...", pid, len(holding_updates))
+        sb.table("holdings").upsert(holding_updates).execute()
+
+    # 2. Insert new holdings
+    if holding_inserts:
+        log.info("[%s] Batch entering %d holdings...", pid, len(holding_inserts))
+        sb.table("holdings").insert(holding_inserts).execute()
+
+    # 3. Insert transaction logs
+    if transaction_inserts:
+        log.info("[%s] Batch inserting %d transaction logs...", pid, len(transaction_inserts))
+        sb.table("transactions").insert(transaction_inserts).execute()
+
+    # 4. Update portfolio cash and timestamp immediately after dependencies succeed
     remaining_cash = cash_pool - cash_spent
     sb.table("portfolios").update({
         "remaining_cash": remaining_cash,

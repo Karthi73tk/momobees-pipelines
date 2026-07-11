@@ -1,7 +1,6 @@
 # .github/workflows/daily_sync.yml
 #
-# Runs Mon–Fri at 4:30 AM IST = 23:00 UTC (previous calendar day).
-# IST is UTC+5:30, so 4:30 IST = 23:00 UTC the night before.
+# Runs Mon–Fri at 4:30 PM IST = 11:00 UTC.
 #
 # Each script writes results/SCRIPT.json with succeeded/failed/skipped counts.
 # The final step reads all result files and sends one consolidated Telegram message.

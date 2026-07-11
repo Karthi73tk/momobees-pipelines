@@ -144,7 +144,10 @@ def _last_known_benchmark(sb):
         .limit(1)
         .execute()
     )
-    return float(resp.data[0]["benchmark_nav"]) if resp.data else None
+    if resp.data:
+        val = resp.data[0].get("benchmark_nav")
+        return float(val) if val is not None else None
+    return None
 
 
 def snapshot_all_portfolios() -> dict:
@@ -200,6 +203,19 @@ def snapshot_all_portfolios() -> dict:
         try:
             p_holdings = holdings_by_portfolio.get(pid, [])
 
+            # Batch update open holding current prices for this portfolio
+            p_holding_updates = []
+            for h in p_holdings:
+                price = prices.get(h["ticker"])
+                if price is not None:
+                    p_holding_updates.append({
+                        "id": h["id"],
+                        "current_price": price
+                    })
+            if p_holding_updates:
+                log.info("[%s] Batch updating current prices for %d holdings...", pid, len(p_holding_updates))
+                sb.table("holdings").upsert(p_holding_updates).execute()
+
             holdings_value = 0.0
             for h in p_holdings:
                 price = prices.get(h["ticker"])
@@ -207,8 +223,6 @@ def snapshot_all_portfolios() -> dict:
                     # Fall back to entry price rather than dropping the position from the valuation entirely
                     price = float(h["entry_price"])
                     log.warning("Using entry_price fallback for %s in portfolio %s", h["ticker"], pid)
-                else:
-                    sb.table("holdings").update({"current_price": price}).eq("id", h["id"]).execute()
                 holdings_value += float(h["quantity"]) * price
 
             total_nav = holdings_value + float(portfolio["remaining_cash"])
