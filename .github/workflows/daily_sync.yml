@@ -76,6 +76,16 @@ jobs:
         run: python scripts/momentum_scanner.py
         continue-on-error: true
 
+      # ── Step 6: Portfolio Rebalance ────────────────────────────────────────
+      - name: Run portfolio_rebalance_d.py
+        run: python scripts/portfolio_rebalance_d.py
+        continue-on-error: true
+
+      # ── Step 7: Portfolio NAV Snapshot ─────────────────────────────────────
+      - name: Run portfolio_nav_snapshot_d.py
+        run: python scripts/portfolio_nav_snapshot_d.py
+        continue-on-error: true
+
       # ── Send one consolidated Telegram summary ─────────────────────────────
       - name: Send Telegram summary
         if: always()
@@ -85,11 +95,13 @@ jobs:
           from notify import send_telegram
 
           result_files = [
-              ("results/nse_all.json",     "NSE All Universe Sync"),
-              ("results/n750.json",        "N750 Data Sync"),
-              ("results/market_pulse.json","Market Pulse Global"),
-              ("results/pivot.json",       "Pivot Analysis"),
-              ("results/momentum.json",    "Momentum Scanner (N750)"),
+              ("results/nse_all.json",             "NSE All Universe Sync"),
+              ("results/n750.json",                "N750 Data Sync"),
+              ("results/market_pulse.json",        "Market Pulse Global"),
+              ("results/pivot.json",               "Pivot Analysis"),
+              ("results/momentum.json",            "Momentum Scanner (N750)"),
+              ("results/portfolio_rebalance.json", "Portfolio Rebalance"),
+              ("results/portfolio_nav.json",       "Portfolio NAV Snapshot"),
           ]
 
           lines = ["🗓 <b>Daily Sync Summary</b>\n"]

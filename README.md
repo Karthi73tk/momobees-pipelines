@@ -12,6 +12,8 @@ Automated daily and weekly data sync pipelines for NSE stocks, running on GitHub
 │   ├── data_sync_engine_n750_d.py      # Daily — N750 RS ratio sync
 │   ├── market_pulse_global_d.py        # Daily — Global indices
 │   ├── pivot_analysis_d.py             # Daily — Pivot point analysis
+│   ├── portfolio_rebalance_d.py        # Daily — Portfolio rebalance
+│   ├── portfolio_nav_snapshot_d.py     # Daily — Portfolio NAV snapshot
 │   ├── stage_analysis_pipeline_w.py    # Weekly — Weinstein stage analysis
 │   └── rrg_pipeline_w.py              # Weekly — RRG pipeline
 ├── notify.py                           # Shared Telegram notification helper
@@ -28,7 +30,7 @@ Automated daily and weekly data sync pipelines for NSE stocks, running on GitHub
 
 | Workflow | Schedule | Scripts |
 |---|---|---|
-| Daily Sync | Mon–Fri 4:30 AM IST | NSE All, N750, Market Pulse, Pivot |
+| Daily Sync | Mon–Fri 4:30 AM IST | NSE All, N750, Market Pulse, Pivot, Portfolio Rebalance, Portfolio NAV Snapshot |
 | Weekly Sync | Friday 5:00 PM IST | Stage Analysis, RRG |
 
 ---
