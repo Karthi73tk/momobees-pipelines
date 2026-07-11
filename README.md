@@ -14,13 +14,14 @@ Automated daily and weekly data sync pipelines for NSE stocks, running on GitHub
 │   ├── pivot_analysis_d.py             # Daily — Pivot point analysis
 │   ├── portfolio_rebalance_d.py        # Daily — Portfolio rebalance
 │   ├── portfolio_nav_snapshot_d.py     # Daily — Portfolio NAV snapshot
+│   ├── sync_universe.py                # Daily — N750 tier/F&O universe sync
 │   ├── stage_analysis_pipeline_w.py    # Weekly — Weinstein stage analysis
 │   └── rrg_pipeline_w.py              # Weekly — RRG pipeline
 ├── notify.py                           # Shared Telegram notification helper
 ├── requirements.txt
 └── .github/
     └── workflows/
-        ├── daily_sync.yml              # Mon–Fri 4:30 AM IST
+        ├── daily_sync.yml              # Mon–Fri 4:30 PM IST
         └── weekly_sync.yml             # Friday 5:00 PM IST
 ```
 
@@ -30,7 +31,7 @@ Automated daily and weekly data sync pipelines for NSE stocks, running on GitHub
 
 | Workflow | Schedule | Scripts |
 |---|---|---|
-| Daily Sync | Mon–Fri 4:30 AM IST | NSE All, N750, Market Pulse, Pivot, Portfolio Rebalance, Portfolio NAV Snapshot |
+| Daily Sync | Mon–Fri 4:30 PM IST | NSE All, Universe Sync, N750, Market Pulse, Pivot, Momentum, Portfolio Rebalance, Portfolio NAV Snapshot |
 | Weekly Sync | Friday 5:00 PM IST | Stage Analysis, RRG |
 
 ---
@@ -88,7 +89,7 @@ Add each of these:
 ### 5. Test the workflows manually
 
 1. Go to your repo → **Actions** tab
-2. Click **Daily Sync (Mon–Fri 4:30 AM IST)**
+2. Click **Daily Sync (Mon–Fri 4:30 PM IST)**
 3. Click **Run workflow** → **Run workflow**
 4. Watch the logs and check your Telegram for notifications
 
@@ -97,7 +98,7 @@ Add each of these:
 GitHub Actions cron uses UTC. Your schedules are:
 
 ```
-Daily:   cron: '0 23 * * 0-4'   # 23:00 UTC Sun–Thu = 4:30 AM IST Mon–Fri
+Daily:   cron: '0 11 * * 1-5'   # 11:00 UTC Mon–Fri = 4:30 PM IST Mon–Fri
 Weekly:  cron: '30 11 * * 5'    # 11:30 UTC Friday  = 5:00 PM IST Friday
 ```
 
