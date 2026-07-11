@@ -357,7 +357,7 @@ def _courtesy_sleep():
     time.sleep(REQUEST_DELAY_SEC + random.uniform(0, REQUEST_JITTER))
 
 
-def fetch_history(symbol: str, exchange: str) -> pd.DataFrame:
+def fetch_history(symbol: str, exchange: str, n_bars: int = N_BARS) -> pd.DataFrame:
     """Fetch OHLCV history with exponential backoff on failure.
 
     - The semaphore caps how many connections/requests are in flight at
@@ -378,7 +378,7 @@ def fetch_history(symbol: str, exchange: str) -> pd.DataFrame:
                     symbol=symbol,
                     exchange=exchange,
                     interval=TIMEFRAME,
-                    n_bars=N_BARS,
+                    n_bars=n_bars,
                 )
                 _courtesy_sleep()
 

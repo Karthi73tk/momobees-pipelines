@@ -4,7 +4,7 @@
 # IST is UTC+5:30, so 4:30 IST = 23:00 UTC the night before.
 #
 # Each script writes results/SCRIPT.json with succeeded/failed/skipped counts.
-# The final step reads all five files and sends one consolidated Telegram message.
+# The final step reads all result files and sends one consolidated Telegram message.
 
 name: Daily Sync (Mon–Fri 4:30 PM IST)
 
@@ -16,7 +16,7 @@ on:
 jobs:
   daily-sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     env:
       NEXT_PUBLIC_SUPABASE_URL:  ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}

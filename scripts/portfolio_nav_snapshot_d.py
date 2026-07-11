@@ -27,12 +27,15 @@ try:
 except ImportError:
     pass
 
+from typing import Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 # We import the TVDatafeed fetch helper from momentum_scanner to reuse its rate limiting and retries.
 try:
-    from momentum_scanner import fetch_history
+    from momentum_scanner import fetch_history, MAX_WORKERS
 except ImportError as e:
     raise SystemExit(
-        "Could not import fetch_history from momentum_scanner. "
+        "Could not import from momentum_scanner. "
         "Ensure this script is run from the repo root or scripts/ directory."
     ) from e
 
@@ -67,24 +70,42 @@ def fetch_ticker_prices(tickers: set[str]) -> dict[str, float]:
     and queries TradingView exactly once per unique ticker per run.
     """
     unique_tickers = sorted(list(tickers))
+    if not unique_tickers:
+        return {}
+
     prices = {}
-    for ticker in unique_tickers:
+
+    def fetch_one(ticker: str) -> Tuple[str, Optional[float]]:
         symbol, exchange = parse_ticker(ticker)
         try:
-            df = fetch_history(symbol, exchange)
+            df = fetch_history(symbol, exchange, n_bars=5)
             if df is not None and not df.empty:
-                prices[ticker] = float(df["close"].iloc[-1])
-                log.info("Fetched price for %s: %.2f", ticker, prices[ticker])
+                return ticker, float(df["close"].iloc[-1])
             else:
                 log.warning("No price data returned for %s:%s", exchange, symbol)
         except Exception as exc:
             log.error("Failed to fetch price for %s:%s: %s", exchange, symbol, exc)
+        return ticker, None
+
+    log.info("Fetching %d unique tickers in parallel using %d workers", len(unique_tickers), MAX_WORKERS)
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_ticker = {executor.submit(fetch_one, t): t for t in unique_tickers}
+        for future in as_completed(future_to_ticker):
+            ticker = future_to_ticker[future]
+            try:
+                t, val = future.result()
+                if val is not None:
+                    prices[t] = val
+                    log.info("Fetched price for %s: %.2f", t, val)
+            except Exception as exc:
+                log.error("Unhandled thread exception for %s: %s", ticker, exc)
+
     return prices
 
 
 def fetch_benchmark_price() -> Optional[float]:
     try:
-        df = fetch_history(BENCHMARK_TICKER, BENCHMARK_EXCHANGE)
+        df = fetch_history(BENCHMARK_TICKER, BENCHMARK_EXCHANGE, n_bars=5)
         if df is not None and not df.empty:
             return float(df["close"].iloc[-1])
     except Exception as exc:
