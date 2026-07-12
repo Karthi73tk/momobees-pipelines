@@ -65,6 +65,11 @@ jobs:
         run: python scripts/data_sync_engine_n750_d.py
         continue-on-error: true
 
+      # ── Step 3b: Market Indices Data Sync ──────────────────────────────────
+      - name: Run data_sync_engine_indices.py
+        run: python scripts/data_sync_engine_indices.py
+        continue-on-error: true
+
       # ── Step 4: Market Pulse Global ────────────────────────────────────────
       - name: Run market_pulse_global_d.py
         run: python scripts/market_pulse_global_d.py
@@ -102,6 +107,7 @@ jobs:
               ("results/nse_all.json",             "NSE All Universe Sync"),
               ("results/universe_sync.json",       "Universe Sync (N750 tiers)"),
               ("results/n750.json",                "N750 Data Sync"),
+              ("results/indices.json",             "Indices Data Sync"),
               ("results/market_pulse.json",        "Market Pulse Global"),
               ("results/pivot.json",               "Pivot Analysis"),
               ("results/momentum.json",            "Momentum Scanner (N750)"),
