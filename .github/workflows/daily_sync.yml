@@ -85,6 +85,11 @@ jobs:
         run: python scripts/momentum_scanner.py
         continue-on-error: true
 
+      # ── Step 6b: Weekly Momentum Scanner (N500) ────────────────────────────
+      - name: Run momentum_weekly_scanner.py
+        run: python scripts/momentum_weekly_scanner.py
+        continue-on-error: true
+
       # ── Step 7: Portfolio Rebalance ────────────────────────────────────────
       - name: Run portfolio_rebalance_d.py
         run: python scripts/portfolio_rebalance_d.py
@@ -111,6 +116,7 @@ jobs:
               ("results/market_pulse.json",        "Market Pulse Global"),
               ("results/pivot.json",               "Pivot Analysis"),
               ("results/momentum.json",            "Momentum Scanner (N750)"),
+              ("results/momentum_weekly.json",     "Weekly Momentum Scanner (N500)"),
               ("results/portfolio_rebalance.json", "Portfolio Rebalance"),
               ("results/portfolio_nav.json",       "Portfolio NAV Snapshot"),
           ]
