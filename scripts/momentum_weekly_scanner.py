@@ -156,6 +156,7 @@ class ScanResult:
     valid: bool
     data_bars: int
     reason_failed: Optional[str]
+    avg_turnover_20d_cr: float = np.nan  # 20d avg (close * volume), in INR crore -- liquidity proxy only, not a filter here
 
 
 # =========================================================================
@@ -214,6 +215,10 @@ def _build_rows(ranked_df: pd.DataFrame, asof_date: str, week_start_date: str,
                 "rebalance_execution_dow": REBALANCE_EXECUTION_DOW,
                 "lookback_days": LOOKBACK_DAYS,
                 "universe": f"{UNIVERSE_SCHEMA}.{UNIVERSE_TABLE}",
+                # Liquidity proxy only -- 20d avg (close * volume) in INR crore.
+                # Not applied as a filter/rank input by this scanner; consumed
+                # optionally by the frontend portfolio builder's buffer logic.
+                "avg_turnover_20d_cr": clean_db_value(getattr(row, "avg_turnover_20d_cr", None)),
             },
         })
     return rows
@@ -515,6 +520,14 @@ def scan_one_ticker(ticker: str, exchange: str, asof: str) -> ScanResult:
 
     momentum_score = (perf_pct / vol_pct) if valid else np.nan
 
+    # Liquidity proxy only -- not used as a ranking or eligibility filter here.
+    # Surfaced in metadata so downstream consumers (e.g. the MoMoBees portfolio
+    # builder) can apply their own liquidity floor without a schema change.
+    avg_turnover_20d_cr = np.nan
+    if "volume" in df.columns and len(df) >= 20:
+        tail = df.tail(20)
+        avg_turnover_20d_cr = float((tail["close"] * tail["volume"]).mean() / 1e7)
+
     return ScanResult(
         ticker=ticker,
         close=close.iloc[-1] if not close.empty else np.nan,
@@ -524,6 +537,7 @@ def scan_one_ticker(ticker: str, exchange: str, asof: str) -> ScanResult:
         valid=valid,
         data_bars=bars_used,
         reason_failed=reason_failed,
+        avg_turnover_20d_cr=avg_turnover_20d_cr,
     )
 
 
