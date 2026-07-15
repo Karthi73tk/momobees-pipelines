@@ -70,6 +70,11 @@ jobs:
         run: python scripts/data_sync_engine_indices.py
         continue-on-error: true
 
+      # ── Step 3c: Index Monthly Returns Sync ────────────────────────────────
+      - name: Run sync_index_monthly_returns.py
+        run: python scripts/sync_index_monthly_returns.py
+        continue-on-error: true
+
       # ── Step 4: Market Pulse Global ────────────────────────────────────────
       - name: Run market_pulse_global_d.py
         run: python scripts/market_pulse_global_d.py
@@ -113,6 +118,7 @@ jobs:
               ("results/universe_sync.json",       "Universe Sync (N750 tiers)"),
               ("results/n750.json",                "N750 Data Sync"),
               ("results/indices.json",             "Indices Data Sync"),
+              ("results/index_monthly_returns.json", "Index Monthly Returns Sync"),
               ("results/market_pulse.json",        "Market Pulse Global"),
               ("results/pivot.json",               "Pivot Analysis"),
               ("results/momentum.json",            "Momentum Scanner (N750)"),
