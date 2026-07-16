@@ -16,6 +16,7 @@ import pathlib
 import json
 import logging
 import argparse
+import datetime
 from datetime import date
 
 # Ensure scripts directory is in python search path so we can import momentum_scanner
@@ -109,10 +110,34 @@ def fetch_ticker_prices(tickers: set[str]) -> dict[str, float]:
 
 def _is_due(portfolio: dict, today: date) -> bool:
     last = portfolio.get("last_rebalanced_at")
-    if not last:
+    last_date = date.fromisoformat(last) if last else None
+    strategy_key = portfolio.get("strategy_key")
+    freq = portfolio.get("rebalance_frequency", "weekly")
+
+    if strategy_key == "momentum_n750" and freq == "monthly":
+        day = portfolio.get("rebalance_day_of_month")
+        if day is None:
+            log.warning("Portfolio %s is missing rebalance_day_of_month. Falling back to rolling 28-day logic.", portfolio.get("id"))
+            if not last_date: return True
+            return (today - last_date).days >= 28
+        
+        if today.day == day:
+            if not last_date:
+                return True
+            return (today.year != last_date.year) or (today.month != last_date.month)
+        return False
+
+    if strategy_key == "momentum_weekly":
+        if today.weekday() == 0:
+            if not last_date:
+                return True
+            return last_date < today
+        return False
+
+    # Default fallback: rolling cadence
+    if not last_date:
         return True
-    last_date = date.fromisoformat(last)
-    cadence_days = CADENCE_DAYS.get(portfolio.get("rebalance_frequency", "weekly"), 7)
+    cadence_days = CADENCE_DAYS.get(freq, 7)
     return (today - last_date).days >= cadence_days
 
 
@@ -259,7 +284,7 @@ def rebalance_due_portfolios(force: bool = False) -> dict:
 
     portfolios = (
         sb.table("portfolios")
-        .select("id, remaining_cash, target_size, rebalance_frequency, last_rebalanced_at")
+        .select("id, remaining_cash, target_size, rebalance_frequency, last_rebalanced_at, strategy_key, rebalance_day_of_month, broker, pending_rebalance_since")
         .in_("status", ACTIVE_STATUSES)
         .execute()
         .data
@@ -289,6 +314,29 @@ def rebalance_due_portfolios(force: bool = False) -> dict:
 
     for portfolio in due:
         pid = portfolio["id"]
+        broker = portfolio.get("broker")
+
+        if broker != "VIRTUAL":
+            try:
+                if not portfolio.get("pending_rebalance_since"):
+                    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                    sb.table("portfolios").update({
+                        "pending_rebalance_since": now_iso
+                    }).eq("id", pid).execute()
+
+                    sb.table("portfolio_logs").insert({
+                        "portfolio_id": pid,
+                        "log_type": "rebalance",
+                        "content": "Rebalance is due and awaiting manual execution"
+                    }).execute()
+                    log.info("Flagged Real portfolio %s as pending rebalance.", pid)
+                succeeded_count += 1
+            except Exception as exc:
+                log.exception("Failed to flag Real portfolio %s", pid)
+                failed_count += 1
+                errors.append(f"{pid}: {str(exc)}")
+            continue
+
         try:
             _rebalance_one(sb, momentum_client, portfolio, today)
             succeeded_count += 1
