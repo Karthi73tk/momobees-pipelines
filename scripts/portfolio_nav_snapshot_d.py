@@ -213,8 +213,11 @@ def snapshot_all_portfolios() -> dict:
                         "current_price": price
                     })
             if p_holding_updates:
-                log.info("[%s] Batch updating current prices for %d holdings...", pid, len(p_holding_updates))
-                sb.table("holdings").upsert(p_holding_updates).execute()
+                log.info("[%s] Updating current prices for %d holdings...", pid, len(p_holding_updates))
+                for upd in p_holding_updates:
+                    res = sb.table("holdings").update({"current_price": upd["current_price"]}).eq("id", upd["id"]).execute()
+                    if not res.data:
+                        log.warning("[%s] Holding %s not found during update (possibly deleted). Skipped.", pid, upd["id"])
 
             holdings_value = 0.0
             for h in p_holdings:

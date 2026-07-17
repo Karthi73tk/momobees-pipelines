@@ -178,7 +178,6 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
     transaction_inserts = []
 
     # ── Exits ──────────────────────────────────────────────────────────────
-    freed_cash = 0.0
     for h in to_exit:
         exit_price = prices.get(h["ticker"])
         if exit_price is None:
@@ -186,8 +185,6 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
             exit_price = float(h["entry_price"])
             log.warning("Using entry_price fallback for exit %s", h["ticker"])
         
-        freed_cash += float(h["quantity"]) * exit_price
-
         # Prepare holding update
         holding_updates.append({
             "id": h["id"],
@@ -195,17 +192,37 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
             "exit_price": exit_price,
             "exit_date": today.isoformat(),
             "exit_reason": "rebalance_exit",
+            "quantity": h["quantity"],
+            "ticker": h["ticker"]
         })
 
-        # Prepare transaction insert
-        transaction_inserts.append({
-            "portfolio_id": pid,
-            "ticker": h["ticker"],
-            "quantity": h["quantity"],
-            "price": exit_price,
-            "type": "SELL",
-        })
-        log.info("[%s] prepared exit for %s @ %.2f (rebalance_exit)", pid, h["ticker"], exit_price)
+    freed_cash = 0.0
+    closed_count = 0
+    if holding_updates:
+        log.info("[%s] Closing %d holdings...", pid, len(holding_updates))
+        for upd in holding_updates:
+            res = sb.table("holdings").update({
+                "status": upd["status"],
+                "exit_price": upd["exit_price"],
+                "exit_date": upd["exit_date"],
+                "exit_reason": upd["exit_reason"],
+            }).eq("id", upd["id"]).execute()
+            if not res.data:
+                log.warning("[%s] Holding %s not found during exit close (possibly deleted). Skipped.", pid, upd["id"])
+                continue
+
+            freed_cash += float(upd["quantity"]) * upd["exit_price"]
+            closed_count += 1
+
+            # Prepare transaction insert
+            transaction_inserts.append({
+                "portfolio_id": pid,
+                "ticker": upd["ticker"],
+                "quantity": upd["quantity"],
+                "price": upd["exit_price"],
+                "type": "SELL",
+            })
+            log.info("[%s] confirmed exit for %s @ %.2f (rebalance_exit)", pid, upd["ticker"], upd["exit_price"])
 
     cash_pool = float(portfolio["remaining_cash"]) + freed_cash
 
@@ -248,9 +265,7 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
 
     # ── Execute Database Mutations in Batches ──────────────────────────────
     # 1. Update holdings (close exits)
-    if holding_updates:
-        log.info("[%s] Batch closing %d holdings...", pid, len(holding_updates))
-        sb.table("holdings").upsert(holding_updates).execute()
+    # (Exits already closed synchronously during freed_cash accumulation)
 
     # 2. Insert new holdings
     if holding_inserts:
@@ -271,7 +286,7 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
 
     log.info(
         "[%s] rebalance complete: %d exited, %d entered, cash now %.2f",
-        pid, len(to_exit), len(entries), remaining_cash,
+        pid, closed_count, len(entries), remaining_cash,
     )
 
 

@@ -268,6 +268,14 @@ def save_momentum_weekly_snapshot(
                 len(rows), MOMENTUM_SCHEMA, MOMENTUM_TABLE, asof_date,
             )
 
+            # --- cleanup history: keep only the last 30 days of data ---
+            try:
+                thirty_days_ago = (pd.Timestamp(asof_date) - pd.Timedelta(days=30)).date().isoformat()
+                history_client.delete().lt("asof_date", thirty_days_ago).execute()
+                log.info("Cleaned up history older than %s", thirty_days_ago)
+            except Exception as e:
+                log.warning("Failed to clean up old history records: %s", e)
+
         return len(rows)
     except Exception as exc:
         raise RuntimeError(
