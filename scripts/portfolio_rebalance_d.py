@@ -141,9 +141,10 @@ def _is_due(portfolio: dict, today: date) -> bool:
     return (today - last_date).days >= cadence_days
 
 
-def _fetch_top_n_tickers(sb, n: int) -> list[str]:
+def _fetch_top_n_tickers(momentum_client, n: int, strategy_key: str) -> list[str]:
+    table_name = "momentum_weekly" if strategy_key == "momentum_weekly" else "momentum"
     resp = (
-        sb.table("momentum")
+        momentum_client.table(table_name)
         .select("ticker, rank")
         .lte("rank", n)
         .order("rank")
@@ -155,16 +156,33 @@ def _fetch_top_n_tickers(sb, n: int) -> list[str]:
 def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
     pid = portfolio["id"]
     target_size = portfolio["target_size"]
+    strategy_key = portfolio.get("strategy_key")
 
     holdings = sb.table("holdings").select("*").eq("portfolio_id", pid).eq("status", "open").execute().data
     held_tickers = {h["ticker"] for h in holdings}
 
-    top_n_tickers = set(_fetch_top_n_tickers(momentum_client, target_size))
-    if not top_n_tickers:
+    is_go_cash = False
+    top_n_tickers = set()
+
+    if strategy_key == "momentum_weekly":
+        regime_resp = momentum_client.table("momentum_weekly_regime").select("regime_action, uncorrelated_asset_symbol").order("asof_date", desc=True).limit(1).execute()
+        regime_data = regime_resp.data[0] if regime_resp.data else None
+        
+        if regime_data and regime_data.get("regime_action") == "GO_CASH":
+            is_go_cash = True
+            symbol = regime_data.get("uncorrelated_asset_symbol")
+            if symbol:
+                top_n_tickers = {symbol}
+        else:
+            top_n_tickers = set(_fetch_top_n_tickers(momentum_client, target_size, strategy_key))
+    else:
+        top_n_tickers = set(_fetch_top_n_tickers(momentum_client, target_size, strategy_key))
+
+    if not top_n_tickers and not is_go_cash:
         log.warning("No momentum picks available — skipping rebalance for portfolio %s", pid)
         raise ValueError("No momentum picks available")
 
-    if len(top_n_tickers) < target_size:
+    if len(top_n_tickers) < target_size and not is_go_cash:
         log.warning("[%s] Only %d momentum picks available for target size %d", pid, len(top_n_tickers), target_size)
 
     to_exit = [h for h in holdings if h["ticker"] not in top_n_tickers]
@@ -173,56 +191,26 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
     all_needed_prices = {h["ticker"] for h in to_exit} | to_enter_tickers
     prices = fetch_ticker_prices(all_needed_prices)
 
-    holding_updates = []
-    holding_inserts = []
-    transaction_inserts = []
+    trades = []
+    freed_cash = 0.0
 
     # ── Exits ──────────────────────────────────────────────────────────────
     for h in to_exit:
         exit_price = prices.get(h["ticker"])
         if exit_price is None:
-            # Fall back to entry price rather than failing completely
-            exit_price = float(h["entry_price"])
-            log.warning("Using entry_price fallback for exit %s", h["ticker"])
+            # Skip the exit entirely rather than fabricating an exit price
+            log.warning("[%s] Skipping exit for %s due to missing live price", pid, h["ticker"])
+            continue
         
-        # Prepare holding update
-        holding_updates.append({
-            "id": h["id"],
-            "status": "closed",
-            "exit_price": exit_price,
-            "exit_date": today.isoformat(),
-            "exit_reason": "rebalance_exit",
+        trades.append({
+            "holding_id": h["id"],
+            "ticker": h["ticker"],
             "quantity": h["quantity"],
-            "ticker": h["ticker"]
+            "price": exit_price,
+            "type": "SELL"
         })
-
-    freed_cash = 0.0
-    closed_count = 0
-    if holding_updates:
-        log.info("[%s] Closing %d holdings...", pid, len(holding_updates))
-        for upd in holding_updates:
-            res = sb.table("holdings").update({
-                "status": upd["status"],
-                "exit_price": upd["exit_price"],
-                "exit_date": upd["exit_date"],
-                "exit_reason": upd["exit_reason"],
-            }).eq("id", upd["id"]).execute()
-            if not res.data:
-                log.warning("[%s] Holding %s not found during exit close (possibly deleted). Skipped.", pid, upd["id"])
-                continue
-
-            freed_cash += float(upd["quantity"]) * upd["exit_price"]
-            closed_count += 1
-
-            # Prepare transaction insert
-            transaction_inserts.append({
-                "portfolio_id": pid,
-                "ticker": upd["ticker"],
-                "quantity": upd["quantity"],
-                "price": upd["exit_price"],
-                "type": "SELL",
-            })
-            log.info("[%s] confirmed exit for %s @ %.2f (rebalance_exit)", pid, upd["ticker"], upd["exit_price"])
+        freed_cash += float(h["quantity"]) * exit_price
+        log.info("[%s] prepared exit for %s @ %.2f (rebalance_exit)", pid, h["ticker"], exit_price)
 
     cash_pool = float(portfolio["remaining_cash"]) + freed_cash
 
@@ -232,61 +220,38 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
     if skipped:
         log.warning("[%s] skipping entries with no price this run: %s", pid, skipped)
 
-    cash_spent = 0.0
     if entries:
         alloc_per_entry = cash_pool / len(entries)
         for ticker in entries:
             price = prices[ticker]
+            if price <= 0:
+                log.error("[%s] Zero/negative price for %s (%.2f). Skipping.", pid, ticker, price)
+                continue
             qty = int(alloc_per_entry // price)
             if qty <= 0:
                 continue
-            allocation = qty * price
-            cash_spent += allocation
-
-            # Prepare holding insert
-            holding_inserts.append({
-                "portfolio_id": pid,
-                "ticker": ticker,
-                "quantity": qty,
-                "entry_price": price,
-                "current_price": price,
-                "status": "open",
-            })
-
-            # Prepare transaction insert
-            transaction_inserts.append({
-                "portfolio_id": pid,
+            
+            trades.append({
                 "ticker": ticker,
                 "quantity": qty,
                 "price": price,
-                "type": "BUY",
+                "type": "BUY"
             })
             log.info("[%s] prepared entry for %s x%d @ %.2f", pid, ticker, qty, price)
 
-    # ── Execute Database Mutations in Batches ──────────────────────────────
-    # 1. Update holdings (close exits)
-    # (Exits already closed synchronously during freed_cash accumulation)
-
-    # 2. Insert new holdings
-    if holding_inserts:
-        log.info("[%s] Batch entering %d holdings...", pid, len(holding_inserts))
-        sb.table("holdings").insert(holding_inserts).execute()
-
-    # 3. Insert transaction logs
-    if transaction_inserts:
-        log.info("[%s] Batch inserting %d transaction logs...", pid, len(transaction_inserts))
-        sb.table("transactions").insert(transaction_inserts).execute()
-
-    # 4. Update portfolio cash and timestamp immediately after dependencies succeed
-    remaining_cash = cash_pool - cash_spent
-    sb.table("portfolios").update({
-        "remaining_cash": remaining_cash,
-        "last_rebalanced_at": today.isoformat(),
-    }).eq("id", pid).execute()
+    # ── Execute Database Mutations in Single Atomic Call ───────────────────
+    log.info("[%s] Executing atomic rebalance RPC with %d trades...", pid, len(trades))
+    
+    # We always call execute_rebalance even if trades is empty, so it can
+    # bump last_rebalanced_at and write the 'No changes made' log entry.
+    res = sb.rpc("execute_rebalance", {
+        "p_portfolio_id": pid,
+        "p_trades": trades
+    }).execute()
 
     log.info(
-        "[%s] rebalance complete: %d exited, %d entered, cash now %.2f",
-        pid, closed_count, len(entries), remaining_cash,
+        "[%s] rebalance complete: %d exited, %d entered",
+        pid, len(to_exit), len(entries),
     )
 
 
