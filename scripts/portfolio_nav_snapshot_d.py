@@ -113,24 +113,6 @@ def fetch_benchmark_price() -> Optional[float]:
     return None
 
 
-def _today_bounds_utc():
-    now = datetime.now(timezone.utc)
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    return start, start + timedelta(days=1)
-
-
-def _existing_nav_row_today(sb, portfolio_id: str):
-    start, end = _today_bounds_utc()
-    resp = (
-        sb.table("nav_history")
-        .select("id")
-        .eq("portfolio_id", portfolio_id)
-        .gte("recorded_at", start.isoformat())
-        .lt("recorded_at", end.isoformat())
-        .limit(1)
-        .execute()
-    )
-    return resp.data[0]["id"] if resp.data else None
 
 
 def _last_known_benchmark(sb):
@@ -230,19 +212,15 @@ def snapshot_all_portfolios() -> dict:
 
             total_nav = holdings_value + float(portfolio["remaining_cash"])
 
-            payload = {
-                "portfolio_id": pid,
-                "nav": total_nav,
-                "benchmark_nav": nifty_close,
-            }
-
-            existing_id = _existing_nav_row_today(sb, pid)
-            if existing_id:
-                sb.table("nav_history").update(payload).eq("id", existing_id).execute()
-                log.info("Updated today's NAV for portfolio %s: %.2f", pid, total_nav)
-            else:
-                sb.table("nav_history").insert(payload).execute()
-                log.info("Recorded NAV for portfolio %s: %.2f", pid, total_nav)
+            sb.rpc(
+                "record_portfolio_nav_snapshot",
+                {
+                    "p_portfolio_id": pid,
+                    "p_portfolio_value": total_nav,
+                    "p_benchmark_nav": nifty_close
+                }
+            ).execute()
+            log.info("Recorded NAV for portfolio %s: %.2f", pid, total_nav)
 
             succeeded_count += 1
         except Exception as exc:

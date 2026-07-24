@@ -105,6 +105,10 @@ jobs:
         run: python scripts/portfolio_nav_snapshot_d.py
         continue-on-error: true
 
+      # ── Step 9: Model Portfolio Runner ──────────────────────────────────────
+      - name: Run model_portfolio_runner_d.py
+        run: python scripts/model_portfolio_runner_d.py
+
       # ── Send one consolidated Telegram summary ─────────────────────────────
       - name: Send Telegram summary
         if: always()
@@ -125,6 +129,7 @@ jobs:
               ("results/momentum_weekly.json",     "Weekly Momentum Scanner (N500)"),
               ("results/portfolio_rebalance.json", "Portfolio Rebalance"),
               ("results/portfolio_nav.json",       "Portfolio NAV Snapshot"),
+              ("results/model_portfolio.json",     "Model Portfolio Runner (ST2)"),
           ]
 
           lines = ["🗓 <b>Daily Sync Summary</b>\n"]
