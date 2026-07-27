@@ -153,7 +153,7 @@ def _fetch_top_n_tickers(momentum_client, n: int, strategy_key: str) -> list[str
     return [row["ticker"] for row in (resp.data or [])]
 
 
-def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
+def _compute_rebalance_candidates(sb, momentum_client, portfolio: dict, today: date) -> dict:
     pid = portfolio["id"]
     target_size = portfolio["target_size"]
     strategy_key = portfolio.get("strategy_key")
@@ -163,6 +163,8 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
 
     is_go_cash = False
     top_n_tickers = set()
+    candidate_pool = []
+    threshold = None
 
     if strategy_key == "momentum_weekly":
         regime_resp = momentum_client.table("momentum_weekly_regime").select("regime_action, uncorrelated_asset_symbol").order("asof_date", desc=True).limit(1).execute()
@@ -174,22 +176,53 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
             if symbol:
                 top_n_tickers = {symbol}
         else:
-            top_n_tickers = set(_fetch_top_n_tickers(momentum_client, target_size, strategy_key))
+            threshold = 50
+            candidate_pool = _fetch_top_n_tickers(momentum_client, threshold, strategy_key)
+            top_n_tickers = set(candidate_pool)
     else:
-        top_n_tickers = set(_fetch_top_n_tickers(momentum_client, target_size, strategy_key))
+        threshold = 60 if strategy_key == "momentum_n750" else 50
+        candidate_pool = _fetch_top_n_tickers(momentum_client, threshold, strategy_key)
+        top_n_tickers = set(candidate_pool)
 
     if not top_n_tickers and not is_go_cash:
         log.warning("No momentum picks available — skipping rebalance for portfolio %s", pid)
         raise ValueError("No momentum picks available")
 
-    if len(top_n_tickers) < target_size and not is_go_cash:
-        log.warning("[%s] Only %d momentum picks available for target size %d", pid, len(top_n_tickers), target_size)
+    if not is_go_cash and len(candidate_pool) < threshold:
+        log.warning("[%s] Data quality warning: Only %d momentum picks available in universe (expected %d)", pid, len(candidate_pool), threshold)
 
     to_exit = [h for h in holdings if h["ticker"] not in top_n_tickers]
-    to_enter_tickers = top_n_tickers - held_tickers
+    
+    num_open_kept = len(holdings) - len(to_exit)
+    num_to_buy = max(0, target_size - num_open_kept)
+    
+    to_enter_tickers = set()
+
+    if is_go_cash:
+        to_enter_tickers = top_n_tickers - held_tickers
+    else:
+        potential_buys = [t for t in candidate_pool if t not in held_tickers]
+        to_enter_tickers = set(potential_buys[:num_to_buy])
+        
+        if num_to_buy > 0 and len(to_enter_tickers) < num_to_buy:
+            log.warning("[%s] Insufficient fresh candidates: needed %d slots, but only %d valid picks available", pid, num_to_buy, len(to_enter_tickers))
 
     all_needed_prices = {h["ticker"] for h in to_exit} | to_enter_tickers
-    prices = fetch_ticker_prices(all_needed_prices)
+    
+    return {
+        "portfolio": portfolio,
+        "to_exit": to_exit,
+        "to_enter_tickers": to_enter_tickers,
+        "needed_tickers": all_needed_prices,
+        "holdings_count": len(holdings)
+    }
+
+
+def _finalize_and_execute_rebalance(sb, candidate: dict, prices: dict[str, float]) -> None:
+    portfolio = candidate["portfolio"]
+    pid = portfolio["id"]
+    to_exit = candidate["to_exit"]
+    to_enter_tickers = candidate["to_enter_tickers"]
 
     trades = []
     freed_cash = 0.0
@@ -219,6 +252,15 @@ def _rebalance_one(sb, momentum_client, portfolio: dict, today: date) -> None:
     skipped = to_enter_tickers - set(entries)
     if skipped:
         log.warning("[%s] skipping entries with no price this run: %s", pid, skipped)
+
+    initial_holdings_count = candidate.get("holdings_count", 0)
+    if initial_holdings_count > 0:
+        successful_exits = sum(1 for t in trades if t["type"] == "SELL")
+        actual_num_open_kept = initial_holdings_count - successful_exits
+        actual_slots_available = max(0, portfolio["target_size"] - actual_num_open_kept)
+        if len(entries) > actual_slots_available:
+            log.warning("[%s] Capping entries from %d to %d due to skipped exits", pid, len(entries), actual_slots_available)
+            entries = entries[:actual_slots_available]
 
     if entries:
         alloc_per_entry = cash_pool / len(entries)
@@ -292,6 +334,10 @@ def rebalance_due_portfolios(force: bool = False) -> dict:
 
     momentum_client = sb.schema("strategies")
 
+    candidates = []
+    all_needed = set()
+
+    # Pass 1: Compute Candidates and Real-Broker Flagging
     for portfolio in due:
         pid = portfolio["id"]
         broker = portfolio.get("broker")
@@ -318,10 +364,25 @@ def rebalance_due_portfolios(force: bool = False) -> dict:
             continue
 
         try:
-            _rebalance_one(sb, momentum_client, portfolio, today)
+            candidate = _compute_rebalance_candidates(sb, momentum_client, portfolio, today)
+            candidates.append(candidate)
+            all_needed.update(candidate["needed_tickers"])
+        except Exception as exc:
+            log.exception("Failed to compute rebalance candidates for portfolio %s", pid)
+            failed_count += 1
+            errors.append(f"{pid}: {str(exc)}")
+
+    # Fetch all needed prices once for the entire run
+    prices = fetch_ticker_prices(all_needed)
+
+    # Pass 2: Finalize and Execute
+    for candidate in candidates:
+        pid = candidate["portfolio"]["id"]
+        try:
+            _finalize_and_execute_rebalance(sb, candidate, prices)
             succeeded_count += 1
         except Exception as exc:
-            log.exception("Failed to rebalance portfolio %s", pid)
+            log.exception("Failed to finalize and execute rebalance for portfolio %s", pid)
             failed_count += 1
             errors.append(f"{pid}: {str(exc)}")
 
