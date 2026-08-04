@@ -10,3 +10,5 @@ build/
 .venv/
 venv/
 results/
+reports/
+scripts/.env.local

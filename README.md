@@ -15,7 +15,7 @@ Automated daily and weekly data sync pipelines for NSE stocks, running on GitHub
 │   ├── portfolio_rebalance_d.py        # Daily — Portfolio rebalance
 │   ├── portfolio_nav_snapshot_d.py     # Daily — Portfolio NAV snapshot
 │   ├── sync_universe.py                # Daily — N750 tier/F&O universe sync
-│   ├── stage_analysis_pipeline_w.py    # Weekly — Weinstein stage analysis
+│   ├── swing_professor/                # Weekly + Daily — Swing Professor pipeline (own subfolder, see below)
 │   └── rrg_pipeline_w.py              # Weekly — RRG pipeline
 ├── notify.py                           # Shared Telegram notification helper
 ├── requirements.txt
@@ -25,14 +25,41 @@ Automated daily and weekly data sync pipelines for NSE stocks, running on GitHub
         └── weekly_sync.yml             # Friday 5:00 PM IST
 ```
 
+`scripts/swing_professor/` is a self-contained subfolder, kept separate from
+the unrelated daily/weekly sync scripts above:
+
+```
+scripts/swing_professor/
+├── stage_analysis_pipeline_w.py    # Weekly — Weinstein stage classifier (must run first, see below)
+├── weekly_watchlist_pipeline.py    # Weekly — orchestrator (Components B-G), writes swing_professor.watchlist
+├── daily_rvol_scanner.py           # Daily — RVOL confirmation scan, watchlist tickers only (not the full universe)
+├── clean_base_lib.py               # Clean Base evaluation (depth bands, VCP, weekly 10WMA + daily 50DMA respect)
+├── stage2_checklist.py             # Stage 2 Checklist pre-filter (10w/20w SMA slope, purple-dot count, etc.)
+├── composite_scoring.py            # Fixed-denominator composite ranking
+├── dot_scoring.py                  # Purple/red-dot leg scoring + raw dot counting
+├── lifecycle.py                    # ADD/KEEP/REMOVE/PROMOTE decision table
+├── supabase_watchlist_store.py     # Supabase-backed persistence (swing_professor.watchlist)
+├── stage2_data_lib.py              # Shared Supabase/tvDatafeed fetch helpers
+├── momentum_scanner_tvdatafeed.py  # Component B momentum scan
+├── stage1_to_stage2_screen_v3.py   # Component C young-breakout screen
+└── weekly_report_writer.py         # Weekly markdown report generator
+```
+
+`weekly_watchlist_pipeline.py` must run after `stage_analysis_pipeline_w.py`
+each week — it only *reads* `stage.weekly_stock_stages`, never writes it, and
+works off stale data otherwise (see `The_Professor/Docs/HANDOFF.md` §2).
+`daily_rvol_scanner.py` runs independently, any day, scoped only to whatever
+is currently `ACTIVE` on `swing_professor.watchlist` — not the full NSE
+universe — writing hits to `swing_professor.daily_confirmations`.
+
 ---
 
 ## Schedule
 
 | Workflow | Schedule | Scripts |
 |---|---|---|
-| Daily Sync | Mon–Fri 4:30 PM IST | NSE All, Universe Sync, N750, Market Pulse, Pivot, Momentum, Portfolio Rebalance, Portfolio NAV Snapshot |
-| Weekly Sync | Friday 5:00 PM IST | Stage Analysis, RRG |
+| Daily Sync | Mon–Fri 4:30 PM IST | NSE All, Universe Sync, N750, Market Pulse, Pivot, Momentum, Portfolio Rebalance, Portfolio NAV Snapshot, Swing Professor RVOL Scanner |
+| Weekly Sync | Friday 5:00 PM IST | Stage Analysis, Swing Professor Watchlist, RRG |
 
 ---
 

@@ -109,6 +109,14 @@ jobs:
       - name: Run model_portfolio_runner_d.py
         run: python scripts/model_portfolio_runner_d.py
 
+      # ── Step 10: Swing Professor Daily RVOL Scan ────────────────────────────
+      # Independent of the steps above -- scoped only to tickers already
+      # ACTIVE on swing_professor.watchlist (not the full NSE universe), so
+      # it doesn't depend on today's universe/momentum syncs having run first.
+      - name: Run daily_rvol_scanner.py
+        run: python scripts/swing_professor/daily_rvol_scanner.py
+        continue-on-error: true
+
       # ── Send one consolidated Telegram summary ─────────────────────────────
       - name: Send Telegram summary
         if: always()

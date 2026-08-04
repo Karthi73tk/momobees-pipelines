@@ -50,10 +50,18 @@ jobs:
 
       # ── Step 1: Stage Analysis ─────────────────────────────────────────────
       - name: Run stage_analysis_pipeline_w.py
-        run: python scripts/stage_analysis_pipeline_w.py
+        run: python scripts/swing_professor/stage_analysis_pipeline_w.py
         continue-on-error: true
 
-      # ── Step 2: RRG Pipeline ───────────────────────────────────────────────
+      # ── Step 2: Weekly Watchlist Pipeline (Swing Professor) ─────────────────
+      # Must run after Step 1: it only reads stage.weekly_stock_stages, never
+      # writes it, and works off stale data if the stage classifier hasn't
+      # refreshed it yet this week (see The_Professor/Docs/HANDOFF.md §2).
+      - name: Run weekly_watchlist_pipeline.py
+        run: python scripts/swing_professor/weekly_watchlist_pipeline.py --store-backend supabase --reports-dir reports
+        continue-on-error: true
+
+      # ── Step 3: RRG Pipeline ───────────────────────────────────────────────
       - name: Run rrg_pipeline_w.py
         run: python scripts/rrg_pipeline_w.py
         continue-on-error: true
