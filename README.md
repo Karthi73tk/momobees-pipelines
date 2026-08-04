@@ -155,8 +155,16 @@ Run any script locally:
 ```bash
 pip install -r requirements.txt
 python scripts/data_sync_engine_nse_all_d.py --preview-only
-python scripts/stage_analysis_pipeline_w.py --preview-only
+python scripts/swing_professor/stage_analysis_pipeline_w.py --preview-only
+python scripts/swing_professor/weekly_watchlist_pipeline.py --store-backend supabase --reports-dir reports
+python scripts/swing_professor/daily_rvol_scanner.py --preview-only
 ```
+
+Swing Professor's `.env.local` can also live at `scripts/.env.local` (already
+gitignored) if you're running its scripts directly from within that
+directory — `load_dotenv(".env.local")` resolves relative to the current
+working directory, not the script's own location, so match your `cd`/invocation
+path to wherever the file actually is.
 
 Make sure `.env.local` is in `.gitignore`:
 
