@@ -61,12 +61,9 @@ jobs:
         run: python scripts/swing_professor/weekly_watchlist_pipeline.py --store-backend supabase --reports-dir reports
         continue-on-error: true
 
-      # ── Step 3: RRG Pipeline ───────────────────────────────────────────────
-      - name: Run rrg_pipeline_w.py
-        run: python scripts/rrg_pipeline_w.py
-        continue-on-error: true
-
       # ── Send one consolidated Telegram summary ─────────────────────────────
+      # Note: RRG pipeline runs in its own workflow (rrg_sync.yml) to stay
+      # within the 1-hour timeout.
       - name: Send Telegram summary
         if: always()
         run: |
@@ -76,7 +73,6 @@ jobs:
 
           result_files = [
               ("results/stage.json",        "Stage Analysis (Weekly)"),
-              ("results/rrg.json",          "RRG Pipeline (Weekly)"),
           ]
 
           lines = ["📅 <b>Weekly Sync Summary</b>\n"]

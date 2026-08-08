@@ -1,0 +1,80 @@
+# .github/workflows/rrg_sync.yml
+#
+# Runs every Friday at 5:05 PM IST = 11:35 UTC Friday.
+# Offset 5 minutes from the weekly_sync workflow to avoid runner contention.
+#
+# Split out from weekly_sync.yml because the RRG pipeline is fully independent
+# of the Stage Analysis and Weekly Watchlist pipelines (no shared DB tables,
+# no ordering dependency), and running all three sequentially was exceeding
+# the 1-hour timeout.
+
+name: RRG Sync (Friday 5:05 PM IST)
+
+on:
+  schedule:
+    - cron: '35 11 * * 5'   # 11:35 UTC Friday = 5:05 PM IST Friday
+  workflow_dispatch:          # allow manual trigger from GitHub UI
+
+jobs:
+  rrg-sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    env:
+      NEXT_PUBLIC_SUPABASE_URL:  ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TELEGRAM_BOT_TOKEN:        ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:          ${{ secrets.TELEGRAM_CHAT_ID }}
+      BENCHMARK_TICKER:          NIFTY
+      BENCHMARK_EXCHANGE:        NSE
+      STOCK_EXCHANGE:            NSE
+      LOOKBACK_PERIODS:          150
+      TAIL_PERIODS:              12
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run rrg_pipeline_w.py
+        run: python scripts/rrg_pipeline_w.py
+        continue-on-error: true
+
+      - name: Send Telegram summary
+        if: always()
+        run: |
+          python - <<'EOF'
+          import json, pathlib
+          from notify import send_telegram
+
+          path = pathlib.Path("results/rrg.json")
+          if not path.exists():
+              send_telegram("❌ <b>RRG Pipeline (Weekly)</b> — crashed before writing result\n")
+          else:
+              r = json.loads(path.read_text())
+              icon = "✅" if r["failed"] == 0 else "⚠️"
+              lines = [
+                  f"{icon} <b>{r['script']}</b>\n",
+                  f"   ✔ {r['succeeded']} succeeded  "
+                  f"✖ {r['failed']} failed  "
+                  f"⏭ {r['skipped']} skipped",
+              ]
+              if r.get("errors"):
+                  tickers = ", ".join(r["errors"])
+                  lines.append(f"   <code>{tickers}</code>")
+              send_telegram("\n".join(lines))
+          EOF
