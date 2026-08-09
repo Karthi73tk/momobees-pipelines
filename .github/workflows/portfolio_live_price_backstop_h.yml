@@ -1,0 +1,62 @@
+# .github/workflows/portfolio_live_price_backstop_h.yml
+#
+# Hourly live-price backstop (FEAT-03) for REAL, Zerodha-linked portfolios only.
+# Refreshes holdings.current_price so non-viewers (digests, fresh page loads)
+# aren't stuck on yesterday's EOD price all day.
+#
+# Cron window: 04:30–09:30 UTC = 10:00–15:00 IST, Mon–Fri. This stays strictly
+# inside market-hours.ts's NSE session (09:15–15:30 IST) and finishes before the
+# 4:30 PM IST (11:00 UTC) daily_sync EOD job, so the two never race — the EOD job
+# always writes last and remains authoritative for the day.
+#
+# This job ONLY updates holdings.current_price. It never touches nav_history or
+# TWR — those stay EOD-only via portfolio_nav_snapshot_d.py.
+
+name: Live-Price Backstop (Hourly, 10 AM–3 PM IST)
+
+on:
+  schedule:
+    - cron: '30 4,5,6,7,8,9 * * 1-5'   # 04:30–09:30 UTC Mon–Fri = 10:00–15:00 IST
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (fetch LTP, write nothing to holdings)'
+        type: boolean
+        default: false
+
+jobs:
+  live-price-backstop:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      NEXT_PUBLIC_SUPABASE_URL:  ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      ENCRYPTION_KEY:            ${{ secrets.ENCRYPTION_KEY }}
+      TELEGRAM_BOT_TOKEN:        ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:          ${{ secrets.TELEGRAM_CHAT_ID }}
+      STOCK_EXCHANGE:            NSE
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run portfolio_live_price_backstop_h.py
+        run: |
+          python scripts/portfolio_live_price_backstop_h.py \
+            ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
