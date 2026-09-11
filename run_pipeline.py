@@ -60,6 +60,7 @@ HISTORY_LEN = 5
 
 DAILY_SCRIPTS = [
     {"id": "nse_all",                 "path": "scripts/data_sync_engine_nse_all_d.py"},
+    {"id": "bluesky_screener",        "path": "scripts/bluesky_screener_d.py"},
     {"id": "universe",                "path": "scripts/sync_universe.py"},
     {"id": "n750",                    "path": "scripts/data_sync_engine_n750_d.py"},
     {"id": "indices",                 "path": "scripts/data_sync_engine_indices.py"},
