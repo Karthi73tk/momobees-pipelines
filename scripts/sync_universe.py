@@ -151,6 +151,21 @@ def fetch_index_csv(label: str, url: str) -> pd.DataFrame:
         "company_name": df[name_col].astype(str).str.strip(),
     })
     out["ticker"] = out["raw_symbol"].apply(clean_symbol)
+
+    # NSE's index CSVs periodically include placeholder rows for shares
+    # pending listing after a corporate action (demerger, etc.) -- symbol
+    # prefixed "DUMMY" and company name "Dummy X Ltd." e.g. DUMMYINXGN /
+    # "Dummy Inox Green Ltd.". These are not real, tradeable securities and
+    # should never enter the universe table.
+    is_dummy = (
+        out["ticker"].str.upper().str.startswith("DUMMY")
+        | out["company_name"].str.strip().str.lower().str.startswith("dummy")
+    )
+    if is_dummy.any():
+        dropped = out.loc[is_dummy, "ticker"].tolist()
+        print(f"  [{label}] Dropping {len(dropped)} NSE placeholder 'DUMMY' row(s): {dropped}")
+        out = out.loc[~is_dummy].reset_index(drop=True)
+
     out = out.drop_duplicates(subset="ticker").reset_index(drop=True)
     print(f"  [{label}] {len(out)} unique constituents.")
     return out[["ticker", "company_name"]]
