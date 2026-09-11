@@ -93,13 +93,15 @@ def load_book(sb, variant):
           .order("as_of", desc=True).limit(1).execute().data)
     cash = float(eq[0]["cash"]) if eq else START_CAPITAL
     last_date = eq[0]["as_of"] if eq else None
-    return {p["ticker"]: p for p in pos}, cash, last_date
+    last_is_eod = bool(eq[0].get("is_eod")) if eq else False
+    return {p["ticker"]: p for p in pos}, cash, last_date, last_is_eod
 
 
 def run_variant(sb, variant, cfg, prices, today_c, prior_pivot, run_date, do_write):
-    pos, cash, last_date = load_book(sb, variant)
-    if last_date is not None and str(last_date) >= run_date:
-        log.info("  %s: already processed through %s — skip", variant, last_date); return None
+    pos, cash, last_date, last_is_eod = load_book(sb, variant)
+    if last_date is not None and str(last_date) >= run_date and last_is_eod:
+        log.info("  %s: already EOD-finalised for %s — skip", variant, last_date); return None
+    # if the intraday poller wrote today's row (is_eod=false), we build on its cash/positions.
     risk = cfg["risk_pct"] / 100.0
     closed, opened = [], []
 
@@ -176,7 +178,7 @@ def run_variant(sb, variant, cfg, prices, today_c, prior_pivot, run_date, do_wri
         sb.schema(SCHEMA).table("equity_curve").upsert(dict(
             variant_id=variant, as_of=run_date, cash=round(cash, 2),
             positions_value=round(pos_val, 2), equity=round(equity, 2),
-            n_open=len(pos), n_passed=n_passed,
+            n_open=len(pos), n_passed=n_passed, is_eod=True,
             updated_at=datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()),
             on_conflict="variant_id,as_of").execute()
     return summ

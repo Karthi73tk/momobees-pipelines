@@ -1,0 +1,36 @@
+# .github/workflows/bluesky_intraday.yml
+#
+# Blue Sky intraday poller — live tvDatafeed quotes to check stops and fill
+# intraday breakouts on the two virtual books, BETWEEN the EOD jobs.
+#
+# Runs every 30 min during NSE market hours. The script itself guards on the
+# clock (acts only 09:15–15:35 IST), so off-window firings are cheap no-ops.
+
+name: Blue Sky Intraday (every 30 min, market hours)
+
+on:
+  schedule:
+    - cron: '*/30 3-10 * * 1-5'   # ~09:00–16:00 IST, Mon–Fri (UTC 03:00–10:00)
+  workflow_dispatch:
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      NEXT_PUBLIC_SUPABASE_URL:  ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run bluesky_intraday_poller.py
+        run: python scripts/bluesky_intraday_poller.py
