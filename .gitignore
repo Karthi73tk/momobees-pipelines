@@ -12,3 +12,4 @@ venv/
 results/
 reports/
 scripts/.env.local
+.pipeline_cache.json

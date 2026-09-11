@@ -33,9 +33,8 @@ from supabase import create_client, Client
 from tvDatafeed import TvDatafeed, Interval
 from dotenv import load_dotenv
 
-# Try loading env vars
-env_path = "/Users/karthik/Documents/Vibe Code 2026/agy/MoMoBees_js-main/MoMoBees_js/.env.local"
-load_dotenv(env_path)
+# Load .env.local first (Next.js convention), fall back to .env
+load_dotenv(".env.local")
 load_dotenv()
 
 SUPABASE_URL = os.environ.get("NEXT_PUBLIC_SUPABASE_URL") or os.environ.get("SUPABASE_URL", "")
