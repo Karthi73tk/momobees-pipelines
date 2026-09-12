@@ -62,6 +62,7 @@ DAILY_SCRIPTS = [
     {"id": "nse_all",                 "path": "scripts/data_sync_engine_nse_all_d.py"},
     {"id": "bluesky_screener",        "path": "scripts/bluesky_screener_d.py"},
     {"id": "bluesky_portfolio",       "path": "scripts/bluesky_portfolio_runner_d.py"},
+    {"id": "sar",                 "path": "scripts/sar_pipeline.py", "args": ["--eod"]},
     {"id": "universe",                "path": "scripts/sync_universe.py"},
     {"id": "n750",                    "path": "scripts/data_sync_engine_n750_d.py"},
     {"id": "indices",                 "path": "scripts/data_sync_engine_indices.py"},

@@ -1,0 +1,46 @@
+# .github/workflows/sar_intraday.yml
+#
+# 13/34 SAR (NIFTY 75-min) — fires a few minutes after each 75-min bar close
+# to fold the just-closed bar into the forward-test book and (on any long/short
+# switch or exit) alert Telegram.
+#
+# 75-min bars close at ~10:30, 11:45, 13:00, 14:15 and 15:30 IST. We run a couple
+# of minutes later. The script is idempotent (only bars newer than the book's
+# last_processed_ts are ever acted on) and guards on the clock, so a delayed CI
+# run — or an extra firing — is a cheap no-op. The EOD job (daily_sync.yml) is the
+# authoritative daily close and stamps is_eod=true.
+
+name: SAR Intraday (NIFTY 75-min closes)
+
+on:
+  schedule:
+    - cron: '2 5 * * 1-5'    # ~10:32 IST  (09:15 bar closed at 10:30)
+    - cron: '17 6 * * 1-5'   # ~11:47 IST  (10:30 bar)
+    - cron: '32 7 * * 1-5'   # ~13:02 IST  (11:45 bar)
+    - cron: '47 8 * * 1-5'   # ~14:17 IST  (13:00 bar)
+    - cron: '2 10 * * 1-5'   # ~15:32 IST  (14:15 bar — last decision of the day)
+  workflow_dispatch:
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      NEXT_PUBLIC_SUPABASE_URL:  ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TELEGRAM_BOT_TOKEN:        ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:          ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run sar_pipeline.py (intraday 75-min check)
+        run: python scripts/sar_pipeline.py
