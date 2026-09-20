@@ -117,6 +117,25 @@ def market_open(now=None) -> bool:
     return now.weekday() < 5 and dtime(9, 15) <= now.time() <= dtime(15, 40)
 
 
+def intraday_window(now=None) -> bool:
+    """Should an intraday run do work?
+
+    Deliberately WIDER than `market_open`. GitHub's scheduler delivers these
+    cron runs hours after their nominal time (measured Sep 2026: 3h40m–5h40m
+    late on every workflow), so gating on the live session meant 4 of every 5
+    intraday runs logged "market closed" and the book only ever advanced at the
+    EOD job — no bar-close Telegram alerts at all.
+
+    `advance()` only ever touches bars newer than book.last_processed_ts and the
+    in-progress 75-min bar is dropped, so a late run folds in exactly the bars
+    that have closed and is a no-op once caught up. Running it at 19:00 IST is
+    therefore strictly better than skipping it. Weekends and pre-open still
+    no-op, which is what the guard is actually for.
+    """
+    now = now or datetime.now(IST)
+    return now.weekday() < 5 and now.time() >= dtime(9, 15)
+
+
 # ── 75-min reconstruction from tvDatafeed 15-min continuous future ───────────
 def _bucket(t: dtime) -> dtime:
     b = BUCKETS[0]
@@ -421,8 +440,8 @@ def main():
         run_seed(sb, args.preview_only); return
 
     mode = "eod" if args.eod else "intraday"
-    if mode == "intraday" and not args.force and not market_open():
-        log.info("market closed — nothing to do (use --force to run anyway)."); return
+    if mode == "intraday" and not args.force and not intraday_window():
+        log.info("outside the trading day — nothing to do (use --force to run anyway)."); return
     log.info("=== SAR %s — %s ===", mode.upper(), datetime.now(IST).strftime("%Y-%m-%d %H:%M"))
     run_live(sb, mode, args.preview_only)
     log.info("done.")
