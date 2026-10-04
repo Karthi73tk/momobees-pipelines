@@ -116,7 +116,7 @@ Add each of these:
 ### 5. Test the workflows manually
 
 1. Go to your repo → **Actions** tab
-2. Click **Daily Sync (Mon–Fri 4:30 PM IST)**
+2. Click **Daily Sync (Mon–Fri 4:23 PM IST)**
 3. Click **Run workflow** → **Run workflow**
 4. Watch the logs and check your Telegram for notifications
 
@@ -125,12 +125,36 @@ Add each of these:
 GitHub Actions cron uses UTC. Your schedules are:
 
 ```
-Daily:   cron: '0 11 * * 1-5'   # 11:00 UTC Mon–Fri = 4:30 PM IST Mon–Fri
-Weekly:  cron: '30 11 * * 5'    # 11:30 UTC Friday  = 5:00 PM IST Friday
+Daily:    cron: '53 10 * * 1-5'       # 10:53 UTC Mon–Fri = 4:23 PM IST
+Weekly:   cron: '23 11 * * 5'         # 11:23 UTC Friday  = 4:53 PM IST
+RRG:      cron: '38 11 * * 5'         # 11:38 UTC Friday  = 5:08 PM IST
+Backstop: cron: '23 4,5,6,7,8,9 * * 1-5'  # 09:53–14:53 IST, inside the session
+Blue Sky: cron: '13,43 4-9 * * 1-5'   # 09:43–15:13 IST, every 30 min
+SAR:      5 entries at ~10:38, 11:53, 13:08, 14:23, 15:38 IST (75-min bar closes)
 ```
 
-> **Note:** GitHub Actions cron can be delayed by up to 15 minutes during
-> high-load periods. This is normal and not a configuration issue.
+> **Note — the scheduler runs late, by hours.** Measured across every workflow
+> in this repo from 2026-09-08 to 2026-09-18, GitHub's hosted scheduler created
+> runs **3h40m–5h40m after** their nominal cron, and dropped most firings of the
+> high-frequency ones (Blue Sky landed 2 of ~16 expected runs per day). This is a
+> GitHub-side queue, not a configuration error — the repo is public, so it is not
+> a billing or minutes problem.
+>
+> Two consequences to design around:
+>
+> 1. **Treat the cron as "no earlier than", never as "at".** Every cron here uses
+>    an off-peak minute (never :00 or :30) because round slots are the most
+>    congested, but that is a mitigation, not a fix.
+> 2. **Keep the scripts' clock guards wide.** A guard that only passes during the
+>    live session turns a late run into a no-op. `sar_pipeline.py` is idempotent
+>    (it only ever folds in bars newer than `book.last_processed_ts`), so its
+>    intraday guard deliberately spans the whole weekday from 09:15 IST onward and
+>    a late run simply catches up. `bluesky_intraday_poller.py` reads *live* LTP,
+>    so it cannot do that — a late run there is genuinely useless and still no-ops.
+>
+> If reliable intraday timing ever becomes a hard requirement, GitHub's hosted
+> scheduler is the wrong tool; move those jobs to a self-hosted runner or an
+> external scheduler that calls `workflow_dispatch`.
 
 ---
 

@@ -3,14 +3,23 @@
 # Blue Sky intraday poller — live tvDatafeed quotes to check stops and fill
 # intraday breakouts on the two virtual books, BETWEEN the EOD jobs.
 #
-# Runs every 30 min during NSE market hours. The script itself guards on the
-# clock (acts only 09:15–15:35 IST), so off-window firings are cheap no-ops.
+# Runs every 30 min during NSE market hours. The script guards on the clock
+# (acts only 09:15–15:35 IST), and every firing below now lands inside that
+# window — the previous '*/30 3-10' started at 08:30 IST, not 09:00 as its
+# comment claimed, so two runs a day were guaranteed no-ops.
+#
+# Scheduling note (measured 2026-09-08 → 2026-09-18): GitHub's hosted scheduler
+# delivered EVERY workflow in this repo 3h40m–5h40m after its nominal cron, and
+# dropped most firings of the high-frequency ones. Runs on :00 and :30 sit in the
+# most congested slots, so every cron here now uses an off-peak minute. That is a
+# mitigation, not a cure — treat the nominal time as "no earlier than", and keep
+# the scripts' own clock guards wide enough to stay useful when a run lands late.
 
 name: Blue Sky Intraday (every 30 min, market hours)
 
 on:
   schedule:
-    - cron: '*/30 3-10 * * 1-5'   # ~09:00–16:00 IST, Mon–Fri (UTC 03:00–10:00)
+    - cron: '13,43 4-9 * * 1-5'   # 09:43–15:13 IST, Mon–Fri (UTC 04:13–09:43)
   workflow_dispatch:
 
 jobs:
