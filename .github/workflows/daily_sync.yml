@@ -168,6 +168,7 @@ jobs:
               ("results/portfolio_rebalance.json", "Portfolio Rebalance"),
               ("results/portfolio_nav.json",       "Portfolio NAV Snapshot"),
               ("results/model_portfolio.json",     "Model Portfolio Runner (ST2)"),
+              ("results/rvol.json",                "Swing Professor RVOL Scan"),
           ]
 
           lines = ["🗓 <b>Daily Sync Summary</b>\n"]

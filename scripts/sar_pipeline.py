@@ -395,8 +395,18 @@ def run_live(sb, mode, preview):
             net_points_cum=round(net_cum, 3), is_eod=is_eod, source="live")
             for (ts, eq, st, cx) in eq_points], on_conflict="as_of").execute()
 
-    # 4. book — last_processed_ts only ever moves forward
     last_ts = max(pd.Timestamp(df.index[-1]), pd.Timestamp(after))
+
+    # 3b. EOD confirms everything folded so far, not just the bars it folds itself.
+    # The upsert above only runs when there are NEW bars, so once an intraday run
+    # had already consumed the day's last bar (routine now that late CI runs catch
+    # up), the EOD run had nothing to write and those rows stayed is_eod=false
+    # forever. Stamp every unconfirmed row up to the book's last processed bar.
+    if is_eod:
+        sb.schema(SCHEMA).table("equity_curve").update({"is_eod": True}) \
+            .lte("as_of", _iso(last_ts)).eq("is_eod", False).execute()
+
+    # 4. book — last_processed_ts only ever moves forward
     write_book(sb, state=state, entry_ts=_iso(entry_ts), entry_price=(round(float(entry_price), 2)
                if entry_price is not None else None), lots=int(lots), last_price=round(close_px, 2),
                last_processed_ts=_iso(last_ts), equity=round(float(equity), 2),
