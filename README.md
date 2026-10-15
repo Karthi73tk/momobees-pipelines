@@ -60,6 +60,26 @@ universe — writing hits to `swing_professor.daily_confirmations`.
 |---|---|---|
 | Daily Sync | Mon–Fri 4:30 PM IST | NSE All, Universe Sync, N750, Market Pulse, Pivot, Momentum, Portfolio Rebalance, Portfolio NAV Snapshot, Swing Professor RVOL Scanner |
 | Weekly Sync | Friday 5:00 PM IST | Stage Analysis, Swing Professor Watchlist, RRG |
+| Maintenance (manual) | `workflow_dispatch` only | `model_backfill`, `sar_rebuild` — see below |
+
+### Maintenance (manual repairs)
+
+`maintenance.yml` runs one-off repairs from the Actions tab, on the same runner,
+secrets and UTC clock as the scheduled jobs:
+
+- **`model_backfill`** — `backfill_model_portfolio.py` rebuilds `model.*` from the
+  last recorded NAV to `end_date`. Leave `dry_run` ticked first: it simulates the
+  whole gap and prints the NAV path without writing. Weeks whose ranking has aged
+  out of `momentum_weekly_history` (30-day retention) are re-ranked as of their
+  basis date from TradingView closes over today's `universe.n500`; the log ends with
+  a fidelity check against the newest stored week and states that caveat.
+- **`sar_rebuild`** — `sar_pipeline.py --seed` then `--eod`: resets the SAR book to
+  the 10 Aug hand-off and replays the live period on real 75-min bars.
+
+The daily model runner catches up on its own: each run processes every weekday
+since the last recorded NAV, so a cancelled CI run no longer leaves a hole. It
+stops (and reports `NO_PICKS`) only when a rebalance needs a ranking that is no
+longer stored — that is the case for `model_backfill`.
 
 ---
 

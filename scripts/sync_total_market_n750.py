@@ -176,8 +176,9 @@ def fetch_tv_sector_industry() -> pd.DataFrame:
                     col("exchange") == "NSE",
                     col("is_primary") == True,
                 )
-                .limit(PAGE_SIZE)
+                # limit() is the END of the [start, end) range, not a page size
                 .offset(offset)
+                .limit(offset + PAGE_SIZE)
                 .get_scanner_data()
             )
             if df_page.empty:

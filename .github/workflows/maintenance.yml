@@ -1,0 +1,71 @@
+# .github/workflows/maintenance.yml
+#
+# One-off data repairs, run by hand from the Actions tab — never scheduled.
+# They run here rather than on a laptop so they get the same secrets, Python and
+# UTC clock as the scheduled jobs (the SAR collapsed-bar bug was exactly a
+# laptop-vs-runner clock difference).
+#
+#   model_backfill  backfill_model_portfolio.py — rebuild model.* from the last
+#                   recorded NAV to end_date (default today IST). dry_run
+#                   simulates and writes nothing to model.*. Idempotent: days
+#                   already recorded are skipped by the RPC.
+#   sar_rebuild     sar_pipeline.py --seed, then --eod — reset the SAR book to the
+#                   10 Aug hand-off and replay the live period on 75-min bars.
+#                   Rewrites sar.trades / equity_curve / candles / book.
+
+name: Maintenance (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Repair to run'
+        type: choice
+        options: [model_backfill, sar_rebuild]
+      dry_run:
+        description: 'model_backfill only — simulate, write nothing to model.*'
+        type: boolean
+        default: true
+      end_date:
+        description: 'model_backfill only — last date YYYY-MM-DD (blank = today IST)'
+        type: string
+        default: ''
+
+jobs:
+  maintenance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      NEXT_PUBLIC_SUPABASE_URL:  ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TELEGRAM_BOT_TOKEN:        ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID:          ${{ secrets.TELEGRAM_CHAT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Model portfolio backfill
+        if: inputs.task == 'model_backfill'
+        env:
+          DRY_RUN:  ${{ inputs.dry_run }}
+          END_DATE: ${{ inputs.end_date }}
+        run: |
+          args=()
+          [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+          [ -n "$END_DATE" ] && args+=(--end "$END_DATE")
+          python scripts/backfill_model_portfolio.py "${args[@]}"
+
+      - name: SAR rebuild (--seed, then --eod)
+        if: inputs.task == 'sar_rebuild'
+        run: |
+          python scripts/sar_pipeline.py --seed
+          python scripts/sar_pipeline.py --eod

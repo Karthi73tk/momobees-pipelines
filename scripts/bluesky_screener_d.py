@@ -65,13 +65,16 @@ TV_COLUMNS = ["name", "description", "close", "High.All", "High.All.Date",
 def fetch_universe() -> pd.DataFrame:
     """Whole NSE mainboard equity (paginated), same filter as data_sync_engine_nse_all_d."""
     frames = []
+    # Query.limit() sets the END of TradingView's [start, end) row range, not a
+    # page size — so .limit(2000).offset(2000) asked for [2000, 2000) and every
+    # page after the first came back empty (TypeError), capping the universe at 2000.
     for offset in (0, 2000, 4000):
         try:
             _n, df = (Query().set_markets("india").select(*TV_COLUMNS)
                       .where(col("exchange") == "NSE", col("is_primary") == True,
                              col("type") == "stock", col("subtype") == "common",
                              col("market_cap_basic") > 0)
-                      .limit(2000).offset(offset).get_scanner_data())
+                      .offset(offset).limit(offset + 2000).get_scanner_data())
         except Exception as exc:
             log.info("  offset=%d: no more data (%s)", offset, type(exc).__name__)
             break
