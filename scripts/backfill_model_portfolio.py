@@ -40,6 +40,12 @@ import momentum_weekly_scanner as W           # noqa: E402
 log = logging.getLogger("backfill_model_portfolio")
 sb = R.sb
 
+# A real (non dry-run) backfill refuses to write when the reconstruction looks
+# degraded: too many universe fetches failed (TradingView throttling), or the
+# re-ranked newest stored week disagrees with what the live scanner chose.
+MAX_FETCH_FAILURES = 10
+MIN_FIDELITY = 0.9
+
 
 def _sessions(start, end):
     R.fetch_and_cache_benchmark()
@@ -83,7 +89,7 @@ def _fetch_universe_closes():
             if i % 100 == 0:
                 log.info("  fetched %d/%d", i, len(tickers))
     log.info("Universe closes: %d fetched, %d failed (%s)", len(closes), len(failed), ", ".join(failed[:10]))
-    return closes
+    return closes, failed
 
 
 def _rank_asof(closes, basis_date):
@@ -127,10 +133,10 @@ def build_basis_override(start, end):
     need = sorted({b for b in need if not _has_history(b)})
     if not need:
         log.info("Every invested week in range has a stored ranking -- nothing to reconstruct.")
-        return override, None
+        return override, None, []
 
     log.info("Reconstructing rankings for %d basis date(s): %s", len(need), ", ".join(need))
-    closes = _fetch_universe_closes()
+    closes, failed = _fetch_universe_closes()
     for b in need:
         picks = _rank_asof(closes, b)
         sched = next((s for s in schedule if s["basis_date"] == b), None)
@@ -150,7 +156,15 @@ def build_basis_override(start, end):
         rebuilt_top = {p["ticker"] for p in _rank_asof(closes, ref) if p["rank"] <= 50}
         fidelity = (ref, len(live_top & rebuilt_top), len(live_top))
         log.info("Fidelity check vs stored ranking %s: %d/%d of the live top 50 reproduced", *fidelity)
-    return override, fidelity
+
+    problems = []
+    if len(failed) > MAX_FETCH_FAILURES:
+        problems.append(f"{len(failed)} universe fetches failed (max {MAX_FETCH_FAILURES})")
+    if fidelity is None:
+        problems.append("no stored week to check the reconstruction against")
+    elif fidelity[2] and fidelity[1] / fidelity[2] < MIN_FIDELITY:
+        problems.append(f"fidelity {fidelity[1]}/{fidelity[2]} below {MIN_FIDELITY:.0%}")
+    return override, fidelity, problems
 
 
 def main():
@@ -169,7 +183,14 @@ def main():
         return
     log.info("=== MODEL PORTFOLIO BACKFILL %s -> %s%s ===", start, args.end, " (DRY RUN)" if args.dry_run else "")
 
-    override, fidelity = build_basis_override(start, args.end)
+    override, fidelity, problems = build_basis_override(start, args.end)
+    if problems and not args.dry_run:
+        for msg in problems:
+            log.error("Reconstruction not trustworthy: %s", msg)
+        log.error("Nothing written. Re-run later (or inspect with --dry-run).")
+        sys.exit(1)
+    for msg in problems:
+        log.warning("Reconstruction would be refused for a real run: %s", msg)
 
     sim_state = None
     if args.dry_run:
