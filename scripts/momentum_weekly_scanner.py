@@ -54,6 +54,7 @@ import logging
 import argparse
 import pathlib
 import threading
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -406,6 +407,29 @@ def fetch_history(symbol: str, exchange: str, n_bars: int = N_BARS, interval=Non
     raise last_exc
 
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def is_week_basis_session(market_date: date, asof: str, today: Optional[date] = None) -> bool:
+    """Is `market_date` the session this week's rebalance is calculated on?
+
+    Normally that is Friday. When Friday is an NSE holiday (2 Oct 2026, 25 Dec
+    2026, ...) the week's last session is Thursday, and a strict weekday()==4
+    test skipped the week entirely: no regime row and no rebalance_execution_date,
+    so the following Monday's rebalance silently never happened (week of 5 Oct
+    2026). A live run made on/after this week's Friday whose latest bar is still
+    earlier in the same week means Friday had no session — that bar is the basis.
+    """
+    if market_date.weekday() == REBALANCE_BASIS_DOW:
+        return True
+    if asof != "live" or market_date.weekday() > REBALANCE_BASIS_DOW:
+        return False
+    today = today or datetime.now(IST).date()
+    week_basis_day = market_date + timedelta(days=REBALANCE_BASIS_DOW - market_date.weekday())
+    # Bounded to that weekend: a run next week on stale data must not re-open last week.
+    return week_basis_day <= today <= week_basis_day + timedelta(days=2)
+
+
 def trim_to_asof(df: pd.DataFrame, asof: str) -> pd.DataFrame:
     if asof == "t-1" and len(df) > 1:
         return df.iloc[:-1].copy()
@@ -644,7 +668,7 @@ def run_scan(
 
     asof_date = market_date.isoformat()
     week_start_date = (market_date - pd.Timedelta(days=market_date.weekday())).isoformat()
-    is_rebalance_basis_day = market_date.weekday() == REBALANCE_BASIS_DOW
+    is_rebalance_basis_day = is_week_basis_session(market_date, asof)
 
     rebalance_execution_date = None
     if is_rebalance_basis_day:

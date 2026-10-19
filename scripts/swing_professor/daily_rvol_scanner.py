@@ -27,7 +27,9 @@ Environment variables (.env.local):
 """
 
 import argparse
+import json
 import logging
+import pathlib
 from datetime import date
 from typing import List, Optional
 
@@ -130,11 +132,13 @@ def run_scanner(do_upsert: bool = True) -> List[dict]:
     log.info("Scanning %d ACTIVE watchlist ticker(s) for RVOL confirmation ...", len(tickers))
 
     hits: List[dict] = []
+    errors: List[str] = []
     for ticker in tickers:
         try:
             hit = evaluate_ticker_rvol(ticker)
         except Exception as exc:
             log.error("  X %s: %s: %s", ticker, type(exc).__name__, exc)
+            errors.append(ticker)
             continue
         if hit:
             hits.append(hit)
@@ -156,6 +160,21 @@ def run_scanner(do_upsert: bool = True) -> List[dict]:
             "Wrote %d confirmation row(s) to %s.%s for %s.",
             len(rows), CONFIRMATIONS_SCHEMA, CONFIRMATIONS_TABLE, today_str,
         )
+
+    # Result file for the consolidated daily Telegram summary (same shape as
+    # every other daily_sync step). Without it this step had no summary line,
+    # so a silent no-op, a crash and a clean run all looked identical — and
+    # per-ticker exceptions were only ever visible in the raw job log.
+    pathlib.Path("results").mkdir(exist_ok=True)
+    pathlib.Path("results/rvol.json").write_text(json.dumps({
+        "script": "Swing Professor RVOL Scan",
+        "succeeded": len(tickers) - len(errors),
+        "failed": len(errors),
+        "skipped": 0,
+        "total": len(tickers),
+        "errors": errors,
+        "confirmed": len(hits),
+    }))
 
     return hits
 

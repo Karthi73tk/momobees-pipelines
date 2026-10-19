@@ -1,15 +1,22 @@
 # .github/workflows/daily_sync.yml
 #
-# Runs Mon–Fri at 4:30 PM IST = 11:00 UTC.
+# Runs Mon–Fri at 4:23 PM IST = 10:53 UTC (after the 15:30 IST close).
 #
 # Each script writes results/SCRIPT.json with succeeded/failed/skipped counts.
 # The final step reads all result files and sends one consolidated Telegram message.
+#
+# Scheduling note (measured 2026-09-08 → 2026-09-18): GitHub's hosted scheduler
+# delivered EVERY workflow in this repo 3h40m–5h40m after its nominal cron, and
+# dropped most firings of the high-frequency ones. Runs on :00 and :30 sit in the
+# most congested slots, so every cron here now uses an off-peak minute. That is a
+# mitigation, not a cure — treat the nominal time as "no earlier than", and keep
+# the scripts' own clock guards wide enough to stay useful when a run lands late.
 
-name: Daily Sync (Mon–Fri 4:30 PM IST)
+name: Daily Sync (Mon–Fri 4:23 PM IST)
 
 on:
   schedule:
-    - cron: '0 11 * * 1-5'   # 11:00 UTC Mon-Fri = 4:30 PM IST Mon-Fri
+    - cron: '53 10 * * 1-5'   # 10:53 UTC Mon-Fri = 4:23 PM IST Mon-Fri
   workflow_dispatch:           # allow manual trigger from GitHub UI
 
 jobs:
@@ -121,8 +128,13 @@ jobs:
         continue-on-error: true
 
       # ── Step 9: Model Portfolio Runner ──────────────────────────────────────
+      # continue-on-error is required, not cosmetic: the script calls sys.exit(1)
+      # whenever failed > 0, and it deliberately sets failed = 1 for the GOLDBEES
+      # URGENT_ALERT case — an alert, not a crash. Without this, that alert (or any
+      # single ticker failure) aborts the job and silently skips Step 10 below.
       - name: Run model_portfolio_runner_d.py
         run: python scripts/model_portfolio_runner_d.py
+        continue-on-error: true
 
       # ── Step 10: Swing Professor Daily RVOL Scan ────────────────────────────
       # Independent of the steps above -- scoped only to tickers already
@@ -156,26 +168,38 @@ jobs:
               ("results/portfolio_rebalance.json", "Portfolio Rebalance"),
               ("results/portfolio_nav.json",       "Portfolio NAV Snapshot"),
               ("results/model_portfolio.json",     "Model Portfolio Runner (ST2)"),
+              ("results/rvol.json",                "Swing Professor RVOL Scan"),
           ]
 
           lines = ["🗓 <b>Daily Sync Summary</b>\n"]
 
+          # Parse each result file defensively. A truncated write or a missing
+          # key used to raise out of this whole step, which meant ONE bad file
+          # suppressed the entire summary — the only observability this job has.
           for path, fallback_name in result_files:
               p = pathlib.Path(path)
               if not p.exists():
                   lines.append(f"❌ <b>{fallback_name}</b> — crashed before writing result\n")
                   continue
 
-              r = json.loads(p.read_text())
-              icon = "✅" if r["failed"] == 0 else "⚠️"
+              try:
+                  r = json.loads(p.read_text())
+                  if not isinstance(r, dict):
+                      raise ValueError("result file is not a JSON object")
+              except Exception as exc:
+                  lines.append(f"❌ <b>{fallback_name}</b> — unreadable result file ({exc})\n")
+                  continue
+
+              failed = r.get("failed", 0)
+              icon = "✅" if failed == 0 else "⚠️"
               lines.append(
-                  f"{icon} <b>{r['script']}</b>\n"
-                  f"   ✔ {r['succeeded']} succeeded  "
-                  f"✖ {r['failed']} failed  "
-                  f"⏭ {r['skipped']} skipped"
+                  f"{icon} <b>{r.get('script', fallback_name)}</b>\n"
+                  f"   ✔ {r.get('succeeded', '?')} succeeded  "
+                  f"✖ {failed} failed  "
+                  f"⏭ {r.get('skipped', '?')} skipped"
               )
               if r.get("errors"):
-                  tickers = ", ".join(r["errors"])
+                  tickers = ", ".join(str(e) for e in r["errors"])
                   lines.append(f"   <code>{tickers}</code>")
               lines.append("")
 

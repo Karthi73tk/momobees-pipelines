@@ -117,8 +117,36 @@ def market_open(now=None) -> bool:
     return now.weekday() < 5 and dtime(9, 15) <= now.time() <= dtime(15, 40)
 
 
+def intraday_window(now=None) -> bool:
+    """Should an intraday run do work?
+
+    Deliberately WIDER than `market_open`. GitHub's scheduler delivers these
+    cron runs hours after their nominal time (measured Sep 2026: 3h40m–5h40m
+    late on every workflow), so gating on the live session meant 4 of every 5
+    intraday runs logged "market closed" and the book only ever advanced at the
+    EOD job — no bar-close Telegram alerts at all.
+
+    `advance()` only ever touches bars newer than book.last_processed_ts and the
+    in-progress 75-min bar is dropped, so a late run folds in exactly the bars
+    that have closed and is a no-op once caught up. Running it at 19:00 IST is
+    therefore strictly better than skipping it. Weekends and pre-open still
+    no-op, which is what the guard is actually for.
+    """
+    now = now or datetime.now(IST)
+    return now.weekday() < 5 and now.time() >= dtime(9, 15)
+
+
 # ── 75-min reconstruction from tvDatafeed 15-min continuous future ───────────
-def _bucket(t: dtime) -> dtime:
+SESSION_OPEN, SESSION_CLOSE = dtime(9, 15), dtime(15, 30)
+
+
+def _bucket(t: dtime):
+    """75-min bucket start for a 15-min bar starting at IST time `t`, or None if
+    the bar is outside the cash session. Out-of-session bars used to fall into
+    the 09:15 bucket by default — which is how a whole UTC-stamped day collapsed
+    into one bar without any error."""
+    if not (SESSION_OPEN <= t < SESSION_CLOSE):
+        return None
     b = BUCKETS[0]
     for s in BUCKETS:
         if t >= s:
@@ -126,6 +154,18 @@ def _bucket(t: dtime) -> dtime:
         else:
             break
     return b
+
+
+def _machine_tz():
+    """The timezone tvDatafeed stamped its bars in. It builds them with
+    datetime.fromtimestamp(), i.e. the MACHINE'S local zone: IST on a laptop in
+    India, UTC on a GitHub runner. Split out so tests can pin it."""
+    return datetime.now().astimezone().tzinfo
+
+
+def _to_ist_naive(dt: pd.Series) -> pd.Series:
+    """tvDatafeed's machine-local naive datetimes -> IST wall-clock, naive."""
+    return dt.dt.tz_localize(_machine_tz()).dt.tz_convert(IST).dt.tz_localize(None)
 
 
 def fetch_75min() -> pd.DataFrame:
@@ -136,9 +176,20 @@ def fetch_75min() -> pd.DataFrame:
     if raw is None or raw.empty:
         raise RuntimeError("tvDatafeed returned no 15-min data for " + FEED_SYMBOL)
     m = raw.reset_index().rename(columns={"datetime": "dt"})
-    m["dt"] = pd.to_datetime(m["dt"])
+    m["dt"] = _to_ist_naive(pd.to_datetime(m["dt"]))
     m["date"] = m["dt"].dt.date
     m["bkt"] = m["dt"].dt.time.map(_bucket)
+    outside = int(m["bkt"].isna().sum())
+    if outside:
+        # A handful is normal (a stray pre-open print). Most of the feed landing
+        # outside 09:15–15:30 means the timezone is wrong again — refuse to trade
+        # on collapsed bars rather than silently degrade to daily candles.
+        if outside > 0.05 * len(m):
+            raise RuntimeError(
+                f"{outside}/{len(m)} 15-min bars fall outside the 09:15–15:30 IST session "
+                f"(machine tz {_machine_tz()}); refusing to build 75-min bars.")
+        log.warning("dropping %d out-of-session 15-min bar(s)", outside)
+        m = m[m["bkt"].notna()]
     agg = (m.groupby(["date", "bkt"])
              .agg(open=("open", "first"), high=("high", "max"),
                   low=("low", "min"), close=("close", "last"))
@@ -201,7 +252,7 @@ def advance(df: pd.DataFrame, start_state: str, entry_ts, entry_price, lots,
     for ts, r in fresh.iterrows():
         c, ef, es = r["close"], r["ema_fast"], r["ema_slow"]
         if math.isnan(ef) or math.isnan(es):
-            eq_points.append((ts, equity, NAME[state], c)); continue
+            eq_points.append((ts, equity, NAME[state], c, net_cum)); continue
         if state == 0:
             if c > ef and c > es:
                 do_open(ts, c, 1)
@@ -219,7 +270,7 @@ def advance(df: pd.DataFrame, start_state: str, entry_ts, entry_price, lots,
                     do_close(ts, c, "SAR-Reverse"); do_open(ts, c, 1)
                 else:
                     do_close(ts, c, "Trail-Flat"); state = 0
-        eq_points.append((ts, equity, NAME[state], c))
+        eq_points.append((ts, equity, NAME[state], c, net_cum))
 
     return (trades, NAME[state], entry_ts, entry_price, lots, equity, net_cum, eq_points, opens, ref)
 
@@ -241,17 +292,23 @@ def write_book(sb, **fields):
 
 
 def _iso(ts):
-    return None if ts is None else pd.Timestamp(ts).isoformat()
-
-
-def _naive(ts):
-    """Normalise a (possibly tz-aware) DB timestamp to tz-naive IST-wall-clock,
-    matching the tz-naive df.index. Values are written naive and stored as
-    timestamptz (UTC), so dropping the tz on read recovers the same wall time."""
+    """Bar timestamps are IST wall-clock and naive inside this script. Write them
+    with an explicit +05:30 so timestamptz stores the real instant. (They used
+    to go out naive, Postgres read them as UTC, and every stored bar time was
+    5h30m off for any consumer that treated the column as a real time.)"""
     if ts is None:
         return None
     t = pd.Timestamp(ts)
-    return t.tz_convert(None) if t.tz is not None else t
+    t = t.tz_localize(IST) if t.tz is None else t.tz_convert(IST)
+    return t.isoformat()
+
+
+def _naive(ts):
+    """DB timestamptz -> naive IST wall-clock, matching the naive df.index."""
+    if ts is None:
+        return None
+    t = pd.Timestamp(ts)
+    return t.tz_convert(IST).tz_localize(None) if t.tz is not None else t
 
 
 # ── Telegram ─────────────────────────────────────────────────────────────────
@@ -312,16 +369,19 @@ def run_seed(sb, preview):
     # (seed AND any live rows the previous book produced), then insert fresh.
     sb.schema(SCHEMA).table("trades").delete().in_("source", ["seed", "live"]).execute()
     sb.schema(SCHEMA).table("equity_curve").delete().in_("source", ["seed", "live"]).execute()
+    # candles are a pure cache; clear them so a rebuild can't leave rows from an
+    # earlier timestamp convention (or a collapsed-bar run) beside the fresh ones.
+    sb.schema(SCHEMA).table("candles").delete().gte("ts", "1900-01-01T00:00:00+00:00").execute()
     for i in range(0, len(trades), 100):
         sb.schema(SCHEMA).table("trades").insert(trades[i:i + 100]).execute()
     sb.schema(SCHEMA).table("equity_curve").upsert(eq_points, on_conflict="as_of").execute()
     # hand off FLAT at the boundary; the live machine takes over after this bar,
     # continuing the banded-ratchet sizing from the seed's final lots/ref.
     write_book(sb, state="FLAT", entry_ts=None, entry_price=None, lots=lots, ladder_ref=round(ref, 2),
-               last_processed_ts=BOUNDARY_TS.isoformat(), equity=round(equity, 2),
+               last_processed_ts=_iso(BOUNDARY_TS), equity=round(equity, 2),
                net_points_cum=round(net_cum, 3), last_price=round(float(rows[-1]["exit_price"]), 2))
     sb.schema(SCHEMA).table("runs").insert(dict(
-        mode="seed", last_bar_ts=BOUNDARY_TS.isoformat(), bars_processed=len(trades),
+        mode="seed", last_bar_ts=_iso(BOUNDARY_TS), bars_processed=len(trades),
         state="FLAT", action=f"seeded {len(trades)} 2026 trades, equity ₹{equity:,.0f}")).execute()
 
 
@@ -373,11 +433,21 @@ def run_live(sb, mode, preview):
     if eq_points:
         sb.schema(SCHEMA).table("equity_curve").upsert([dict(
             as_of=_iso(ts), equity=round(float(eq), 2), state=st, close=round(float(cx), 2),
-            net_points_cum=round(net_cum, 3), is_eod=is_eod, source="live")
-            for (ts, eq, st, cx) in eq_points], on_conflict="as_of").execute()
+            net_points_cum=round(float(nc), 3), is_eod=is_eod, source="live")
+            for (ts, eq, st, cx, nc) in eq_points], on_conflict="as_of").execute()
+
+    last_ts = max(pd.Timestamp(df.index[-1]), pd.Timestamp(after))
+
+    # 3b. EOD confirms everything folded so far, not just the bars it folds itself.
+    # The upsert above only runs when there are NEW bars, so once an intraday run
+    # had already consumed the day's last bar (routine now that late CI runs catch
+    # up), the EOD run had nothing to write and those rows stayed is_eod=false
+    # forever. Stamp every unconfirmed row up to the book's last processed bar.
+    if is_eod:
+        sb.schema(SCHEMA).table("equity_curve").update({"is_eod": True}) \
+            .lte("as_of", _iso(last_ts)).eq("is_eod", False).execute()
 
     # 4. book — last_processed_ts only ever moves forward
-    last_ts = max(pd.Timestamp(df.index[-1]), pd.Timestamp(after))
     write_book(sb, state=state, entry_ts=_iso(entry_ts), entry_price=(round(float(entry_price), 2)
                if entry_price is not None else None), lots=int(lots), last_price=round(close_px, 2),
                last_processed_ts=_iso(last_ts), equity=round(float(equity), 2),
@@ -421,8 +491,8 @@ def main():
         run_seed(sb, args.preview_only); return
 
     mode = "eod" if args.eod else "intraday"
-    if mode == "intraday" and not args.force and not market_open():
-        log.info("market closed — nothing to do (use --force to run anyway)."); return
+    if mode == "intraday" and not args.force and not intraday_window():
+        log.info("outside the trading day — nothing to do (use --force to run anyway)."); return
     log.info("=== SAR %s — %s ===", mode.upper(), datetime.now(IST).strftime("%Y-%m-%d %H:%M"))
     run_live(sb, mode, args.preview_only)
     log.info("done.")

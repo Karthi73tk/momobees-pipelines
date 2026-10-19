@@ -185,7 +185,9 @@ def phase1_screener(universe_tickers: List[str]) -> Tuple[List[dict], List[dict]
     all_frames = []
     PAGE_SIZE  = 2000
 
-    for offset in [0, 2000]:
+    # Query.limit() sets the END of TradingView's [start, end) row range, not a
+    # page size, so each page asks for [offset, offset + PAGE_SIZE).
+    for offset in [0, PAGE_SIZE]:
         try:
             _count, df_page = (
                 Query()
@@ -195,8 +197,8 @@ def phase1_screener(universe_tickers: List[str]) -> Tuple[List[dict], List[dict]
                     col("exchange") == "NSE",
                     col("is_primary") == True,
                 )
-                .limit(PAGE_SIZE)
                 .offset(offset)
+                .limit(offset + PAGE_SIZE)
                 .get_scanner_data()
             )
             if df_page.empty:

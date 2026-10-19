@@ -287,8 +287,9 @@ def fetch_tv_sector_industry() -> pd.DataFrame:
                 .set_markets("india")
                 .select("name", "sector", "industry")
                 .where(col("exchange") == "NSE", col("is_primary") == True)
-                .limit(2000)
+                # limit() is the END of the [start, end) range, not a page size
                 .offset(offset)
+                .limit(offset + 2000)
                 .get_scanner_data()
             )
             if df_page.empty:

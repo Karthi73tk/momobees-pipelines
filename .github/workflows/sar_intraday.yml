@@ -4,21 +4,28 @@
 # to fold the just-closed bar into the forward-test book and (on any long/short
 # switch or exit) alert Telegram.
 #
-# 75-min bars close at ~10:30, 11:45, 13:00, 14:15 and 15:30 IST. We run a couple
-# of minutes later. The script is idempotent (only bars newer than the book's
+# 75-min bars close at ~10:30, 11:45, 13:00, 14:15 and 15:30 IST. We run ~8 min
+# later. The script is idempotent (only bars newer than the book's
 # last_processed_ts are ever acted on) and guards on the clock, so a delayed CI
 # run — or an extra firing — is a cheap no-op. The EOD job (daily_sync.yml) is the
 # authoritative daily close and stamps is_eod=true.
+#
+# Scheduling note (measured 2026-09-08 → 2026-09-18): GitHub's hosted scheduler
+# delivered EVERY workflow in this repo 3h40m–5h40m after its nominal cron, and
+# dropped most firings of the high-frequency ones. Runs on :00 and :30 sit in the
+# most congested slots, so every cron here now uses an off-peak minute. That is a
+# mitigation, not a cure — treat the nominal time as "no earlier than", and keep
+# the scripts' own clock guards wide enough to stay useful when a run lands late.
 
 name: SAR Intraday (NIFTY 75-min closes)
 
 on:
   schedule:
-    - cron: '2 5 * * 1-5'    # ~10:32 IST  (09:15 bar closed at 10:30)
-    - cron: '17 6 * * 1-5'   # ~11:47 IST  (10:30 bar)
-    - cron: '32 7 * * 1-5'   # ~13:02 IST  (11:45 bar)
-    - cron: '47 8 * * 1-5'   # ~14:17 IST  (13:00 bar)
-    - cron: '2 10 * * 1-5'   # ~15:32 IST  (14:15 bar — last decision of the day)
+    - cron: '8 5 * * 1-5'     # ~10:38 IST  (09:15 bar closed at 10:30)
+    - cron: '23 6 * * 1-5'    # ~11:53 IST  (10:30 bar)
+    - cron: '38 7 * * 1-5'    # ~13:08 IST  (11:45 bar)
+    - cron: '53 8 * * 1-5'    # ~14:23 IST  (13:00 bar)
+    - cron: '8 10 * * 1-5'    # ~15:38 IST  (14:15 bar — last decision of the day)
   workflow_dispatch:
 
 jobs:

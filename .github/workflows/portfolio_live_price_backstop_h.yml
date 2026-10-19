@@ -4,19 +4,26 @@
 # Refreshes holdings.current_price so non-viewers (digests, fresh page loads)
 # aren't stuck on yesterday's EOD price all day.
 #
-# Cron window: 04:30–09:30 UTC = 10:00–15:00 IST, Mon–Fri. This stays strictly
+# Cron window: 04:23–09:23 UTC = 09:53–14:53 IST, Mon–Fri. This stays strictly
 # inside market-hours.ts's NSE session (09:15–15:30 IST) and finishes before the
-# 4:30 PM IST (11:00 UTC) daily_sync EOD job, so the two never race — the EOD job
+# 4:23 PM IST (10:53 UTC) daily_sync EOD job, so the two never race — the EOD job
 # always writes last and remains authoritative for the day.
 #
 # This job ONLY updates holdings.current_price. It never touches nav_history or
 # TWR — those stay EOD-only via portfolio_nav_snapshot_d.py.
+#
+# Scheduling note (measured 2026-09-08 → 2026-09-18): GitHub's hosted scheduler
+# delivered EVERY workflow in this repo 3h40m–5h40m after its nominal cron, and
+# dropped most firings of the high-frequency ones. Runs on :00 and :30 sit in the
+# most congested slots, so every cron here now uses an off-peak minute. That is a
+# mitigation, not a cure — treat the nominal time as "no earlier than", and keep
+# the scripts' own clock guards wide enough to stay useful when a run lands late.
 
-name: Live-Price Backstop (Hourly, 10 AM–3 PM IST)
+name: Live-Price Backstop (Hourly, ~10 AM–3 PM IST)
 
 on:
   schedule:
-    - cron: '30 4,5,6,7,8,9 * * 1-5'   # 04:30–09:30 UTC Mon–Fri = 10:00–15:00 IST
+    - cron: '23 4,5,6,7,8,9 * * 1-5'   # 04:23–09:23 UTC Mon–Fri = 09:53–14:53 IST
   workflow_dispatch:
     inputs:
       dry_run:

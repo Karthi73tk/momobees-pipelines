@@ -92,7 +92,9 @@ def fetch_nse_mainboard() -> pd.DataFrame:
     frames = []
     fetch_errors = []
 
-    for offset in [0, 2000]:
+    # Query.limit() sets the END of TradingView's [start, end) row range, not a
+    # page size, so each page asks for [offset, offset + PAGE_SIZE).
+    for offset in [0, PAGE_SIZE]:
         log.info("Fetching TV Screener offset=%d ...", offset)
         try:
             _count, df = (
@@ -106,8 +108,8 @@ def fetch_nse_mainboard() -> pd.DataFrame:
                     col("subtype") == "common",
                     col("market_cap_basic") > 0,
                 )
-                .limit(PAGE_SIZE)
                 .offset(offset)
+                .limit(offset + PAGE_SIZE)
                 .get_scanner_data()
             )
             if df.empty:
