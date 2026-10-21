@@ -29,6 +29,7 @@ Environment variables (.env.local):
 import argparse
 import json
 import logging
+import os
 import pathlib
 from datetime import date
 from typing import List, Optional
@@ -126,7 +127,9 @@ def evaluate_ticker_rvol(ticker: str) -> Optional[dict]:
 def run_scanner(do_upsert: bool = True) -> List[dict]:
     load_dotenv(".env.local")
     supabase = get_supabase_client()
-    today_str = date.today().isoformat()
+    # The session the data belongs to (set by daily_sync's session check), so a
+    # holiday or a late run never re-stamps the previous session under a new date.
+    today_str = os.environ.get("MARKET_SESSION_DATE") or date.today().isoformat()
 
     tickers = fetch_active_watchlist_tickers(supabase)
     log.info("Scanning %d ACTIVE watchlist ticker(s) for RVOL confirmation ...", len(tickers))

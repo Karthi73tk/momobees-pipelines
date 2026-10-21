@@ -57,6 +57,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # ── Step 0: Which NSE session is this run for? ─────────────────────────
+      # Exports MARKET_SESSION_DATE (NIFTY's latest daily bar) for the steps that
+      # stamp a date, and trading_day=false on exchange holidays so those steps
+      # skip instead of re-publishing the previous session under today's date.
+      # Fails open if TradingView is unreachable. See scripts/nse_session_check.py.
+      - name: Check NSE session
+        id: session
+        run: python scripts/nse_session_check.py
+        continue-on-error: true
+
       # ── Step 1: NSE All Universe Sync ──────────────────────────────────────
       - name: Run data_sync_engine_nse_all_d.py
         run: python scripts/data_sync_engine_nse_all_d.py
@@ -64,11 +74,13 @@ jobs:
 
       # ── Step 1b: Blue Sky Breakout Screener → bluesky.daily_candidates ─────
       - name: Run bluesky_screener_d.py
+        if: steps.session.outputs.trading_day != 'false'
         run: python scripts/bluesky_screener_d.py
         continue-on-error: true
 
       # ── Step 1c: Blue Sky virtual portfolio runner (2 variants, EOD) ──────
       - name: Run bluesky_portfolio_runner_d.py
+        if: steps.session.outputs.trading_day != 'false'
         run: python scripts/bluesky_portfolio_runner_d.py
         continue-on-error: true
 
@@ -124,6 +136,7 @@ jobs:
 
       # ── Step 8: Portfolio NAV Snapshot ─────────────────────────────────────
       - name: Run portfolio_nav_snapshot_d.py
+        if: steps.session.outputs.trading_day != 'false'
         run: python scripts/portfolio_nav_snapshot_d.py
         continue-on-error: true
 
@@ -141,6 +154,7 @@ jobs:
       # ACTIVE on swing_professor.watchlist (not the full NSE universe), so
       # it doesn't depend on today's universe/momentum syncs having run first.
       - name: Run daily_rvol_scanner.py
+        if: steps.session.outputs.trading_day != 'false'
         run: python scripts/swing_professor/daily_rvol_scanner.py
         continue-on-error: true
 

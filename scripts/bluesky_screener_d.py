@@ -180,7 +180,10 @@ def main():
     ap.add_argument("--top", type=int, default=25, help="rows to print in preview")
     args = ap.parse_args()
 
-    run_date = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    # The session the data belongs to (set by daily_sync's session check), not the
+    # wall clock: an IST date rolled to tomorrow on runs GitHub delivered after 18:30 UTC.
+    run_date = (os.environ.get("MARKET_SESSION_DATE")
+                or datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat())
     log.info("=== BLUE SKY SCREENER — run_date %s ===", run_date)
     df = fetch_universe()
     cand, stats = screen(df)

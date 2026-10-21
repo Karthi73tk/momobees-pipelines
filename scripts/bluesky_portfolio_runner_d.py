@@ -188,7 +188,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--preview-only", action="store_true")
     args = ap.parse_args()
-    run_date = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    # The session the data belongs to (set by daily_sync's session check), not the
+    # wall clock: an IST date rolled to tomorrow on runs GitHub delivered after 18:30 UTC.
+    run_date = (os.environ.get("MARKET_SESSION_DATE")
+                or datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat())
     log.info("=== BLUE SKY PORTFOLIO RUNNER — %s ===", run_date)
     sb = sb_client()
     if not args.preview_only:
