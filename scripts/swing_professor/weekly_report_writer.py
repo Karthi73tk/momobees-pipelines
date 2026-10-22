@@ -38,6 +38,10 @@ def generate_weekly_report(
     lines = []
     lines.append(f"# Weekly Swing-Trading Watchlist Report — {as_of_date}")
     lines.append("")
+    lines.append("> **Informational only — not trade signals.** A 2015–2026 backtest of this pipeline's own "
+                 "layers lost money (−4.3% net CAGR vs +12.1% equal-weight NIFTY 500). See registry id "
+                 "`swing_professor_pipeline_layers_n500` (stanw-stage2/swing_professor_bt/RESULTS.md).")
+    lines.append("")
     lines.append(f"**Generated on:** {as_of_date}  ")
     lines.append(
         f"**Summary:** {len(added_tickers)} Added | {len(kept_tickers)} Kept | "
