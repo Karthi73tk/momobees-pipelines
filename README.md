@@ -25,6 +25,13 @@ Automated daily and weekly data sync pipelines for NSE stocks, running on GitHub
         └── weekly_sync.yml             # Friday 5:00 PM IST
 ```
 
+> **Swing Professor output is informational, not a trade signal.** A layer-by-layer backtest of this
+> pipeline on survivorship-free NIFTY 500 data (2015-01 → 2026-08) found no layer beating the
+> equal-weight universe by more than costs at 5–20 sessions; the full-stack 5-slot swing portfolio
+> returned −4.3% net CAGR vs +12.1%. Registry: `swing_professor_pipeline_layers_n500`
+> (`stanw-stage2/swing_professor_bt/RESULTS.md`). The one robust stage finding — Stage 4 names lag the
+> universe at every horizon — is usable as an exclusion filter.
+
 `scripts/swing_professor/` is a self-contained subfolder, kept separate from
 the unrelated daily/weekly sync scripts above:
 
