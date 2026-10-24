@@ -72,6 +72,13 @@ jobs:
         run: python scripts/data_sync_engine_nse_all_d.py
         continue-on-error: true
 
+      # ── Step 1a: ETF prices → universe.etfs.price ───────────────────────────
+      # ETFs (GOLDBEES) are never in nse_universe. The web app's ST2 GO_CASH plan
+      # reads the gold price from here; a missing GOLDBEES close is URGENT_ALERT.
+      - name: Run sync_etf_prices_d.py
+        run: python scripts/sync_etf_prices_d.py
+        continue-on-error: true
+
       # ── Step 1b: Blue Sky Breakout Screener → bluesky.daily_candidates ─────
       - name: Run bluesky_screener_d.py
         if: steps.session.outputs.trading_day != 'false'
@@ -168,6 +175,7 @@ jobs:
 
           result_files = [
               ("results/nse_all.json",             "NSE All Universe Sync"),
+              ("results/etf_prices.json",          "ETF Price Sync"),
               ("results/bluesky.json",             "Blue Sky Screener"),
               ("results/bluesky_portfolio.json",   "Blue Sky Portfolio"),
               ("results/sar.json",             "SAR (NIFTY 75m)"),
